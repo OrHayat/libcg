@@ -127,7 +127,8 @@ bool platform_init(int width, int height, const char *title) {
     [state.ns_window makeFirstResponder:state.ns_view];
     [state.ns_window setAcceptsMouseMovedEvents:YES];
 
-    state.fb = create_framebuffer(width, height);
+    NSSize backing = [state.ns_view convertSizeToBacking:NSMakeSize(width, height)];
+    state.fb = create_framebuffer((int)backing.width, (int)backing.height);
     s_public_fb.pixels = state.fb.pixels;
     s_public_fb.width  = state.fb.width;
     s_public_fb.height = state.fb.height;
@@ -185,6 +186,20 @@ platform_framebuffer_t *platform_get_framebuffer(void) {
     state.running = false;
 }
 
+- (void)windowDidResize:(NSNotification *)notification {
+    NSWindow *window = [notification object];
+    NSSize logical = [[window contentView] bounds].size;
+    NSSize backing = [[window contentView] convertSizeToBacking:logical];
+
+    destroy_framebuffer(&state.fb);
+    state.fb = create_framebuffer((int)backing.width, (int)backing.height);
+    s_public_fb.pixels = state.fb.pixels;
+    s_public_fb.width  = state.fb.width;
+    s_public_fb.height = state.fb.height;
+
+    [state.ns_view setNeedsDisplay:YES];
+}
+
 @end
 
 /* --- Private helpers --- */
@@ -219,7 +234,8 @@ static NSWindow *create_window(int width, int height, const char *title, id dele
     // clang-format off
     NSUInteger style = NSWindowStyleMaskTitled
                      | NSWindowStyleMaskClosable
-                     | NSWindowStyleMaskMiniaturizable;
+                     | NSWindowStyleMaskMiniaturizable
+                     | NSWindowStyleMaskResizable;
     // clang-format on
 
     NSRect frame = NSMakeRect(0, 0, width, height);
