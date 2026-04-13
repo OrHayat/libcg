@@ -50,6 +50,8 @@ typedef enum {
     PLATFORM_KEY_COUNT
 } platform_key_t;
 
+#define PLATFORM_TEXT_BUFFER 16
+
 typedef struct {
     int  half_transition_count;
     bool ended_down;
@@ -72,6 +74,10 @@ typedef struct {
     platform_button_t keys[PLATFORM_KEY_COUNT];
     platform_mouse_t  mouse;
     bool quit_requested;
+
+    /* text input typed this frame (printable characters only) */
+    char  text[PLATFORM_TEXT_BUFFER];
+    int   text_len;
 } platform_input_t;
 
 static inline bool platform_is_key_down(const platform_input_t *input, platform_key_t k) {
