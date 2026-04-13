@@ -7,6 +7,11 @@ int main(void) {
         return 1;
     }
 
+    platform_framebuffer_t *fb = platform_get_framebuffer();
+    for (int i = 0; i < fb->width * fb->height; i++) {
+        fb->pixels[i] = 0xFFFF8800;  /* AARRGGBB - solid orange */
+    }
+
     bool quit = false;
     while (!quit) {
         platform_poll_events(&quit);
