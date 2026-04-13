@@ -61,19 +61,20 @@ Pixel format: `0xAARRGGBB` (ARGB8888). Top-left origin, row-major.
 
 ## Keyboard Controls
 
-| Key | Action |
-|-----|--------|
-| `1` | Solid color fill |
-| `2` | Gradient (horizontal) |
-| `3` | Color cycle (animated) |
-| `4` | Random noise |
-| `B` | Toggle alpha background: opaque / checkerboard |
-| `T` | Print framebuffer size to stdout |
-| `F` | Toggle fullscreen |
-| `Q` | Quit |
-| `Cmd-Q` | Quit (via menu bar) |
-| `Escape` | Exit fullscreen |
-| `#` | Enter color input mode |
+| Key      | Action                                         |
+|----------|------------------------------------------------|
+| `1`      | Solid color fill                               |
+| `2`      | Gradient (horizontal)                          |
+| `3`      | Color cycle (animated)                         |
+| `4`      | Random noise                                   |
+| `B`      | Toggle alpha background: opaque / checkerboard |
+| `M`      | Toggle mouse coordinate printing (debug)       |
+| `T`      | Print framebuffer size to stdout               |
+| `F`      | Toggle fullscreen                              |
+| `Q`      | Quit                                           |
+| `Cmd-Q`  | Quit (via menu bar)                            |
+| `Escape` | Exit fullscreen                                |
+| `#`      | Enter color input mode                         |
 
 ## Color Input (keyboard state machine)
 
