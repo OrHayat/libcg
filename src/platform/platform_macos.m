@@ -364,6 +364,8 @@ static NSWindow *create_window(int width, int height, const char *title, id dele
     [window setTitle:[NSString stringWithUTF8String:title]];
     [window center];
     [window setDelegate:delegate];
+    [window setOpaque:NO];
+    [window setBackgroundColor:[NSColor clearColor]];
     [window makeKeyAndOrderFront:nil];
     return window;
 }
