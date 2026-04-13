@@ -58,6 +58,13 @@ typedef struct {
 typedef struct {
     platform_button_t keys[PLATFORM_KEY_COUNT];
     bool quit_requested;
+
+    /* mouse — position is persistent, button presses + scroll are edge-triggered */
+    int   mouse_x, mouse_y;
+    bool  mouse_left_pressed;
+    bool  mouse_right_pressed;
+    bool  mouse_middle_pressed;
+    float scroll_dy;
 } platform_input_t;
 
 static inline bool platform_is_key_down(const platform_input_t *input, platform_key_t k) {
