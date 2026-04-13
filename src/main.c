@@ -1,4 +1,5 @@
 #include "platform/platform.h"
+#include "render/framebuffer.h"
 #include <stdio.h>
 
 int main(void) {
@@ -47,9 +48,7 @@ int main(void) {
             printf("scroll: dx=%.1f dy=%.1f\n", (double)input.mouse.scroll_dx, (double)input.mouse.scroll_dy);
 
         platform_framebuffer_t *fb = platform_get_framebuffer();
-        for (int i = 0; i < fb->width * fb->height; i++) {
-            fb->pixels[i] = 0xFFFF8800;  /* AARRGGBB - solid orange */
-        }
+        framebuffer_clear(fb, 0xFFFF8800);  /* AARRGGBB - solid orange */
 
         platform_present();
     }
