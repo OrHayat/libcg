@@ -22,9 +22,15 @@ static platform_state_t        state;
 static platform_framebuffer_t  s_public_fb;
 static platform_input_t       *s_current_input;
 
+/* persistent mouse position, carried across polls */
+static struct {
+    int mouse_x, mouse_y;
+} s_persistent;
+
 /* macOS virtual key codes (US layout) */
 enum {
     KC_Q = 12,
+    KC_M = 46,
 };
 
 /* --- LibcgView (custom NSView that blits the framebuffer) --- */
@@ -43,6 +49,10 @@ enum {
     CGImageRelease(image);
 }
 
+- (BOOL)isFlipped {
+    return YES;  /* top-left origin to match framebuffer */
+}
+
 - (BOOL)acceptsFirstResponder {
     return YES;
 }
@@ -52,8 +62,38 @@ enum {
     unsigned short keyCode = [event keyCode];
     switch (keyCode) {
         case KC_Q: s_current_input->keys_pressed[PLATFORM_KEY_Q] = true; break;
+        case KC_M: s_current_input->keys_pressed[PLATFORM_KEY_M] = true; break;
         default: break;
     }
+}
+
+- (void)updateMousePosition:(NSEvent *)event {
+    if (!s_current_input) return;
+    NSPoint local = [self convertPoint:[event locationInWindow] fromView:nil];
+    s_current_input->mouse_x = (int)local.x;
+    s_current_input->mouse_y = (int)local.y;
+}
+
+- (void)mouseMoved:(NSEvent *)event       { [self updateMousePosition:event]; }
+- (void)mouseDragged:(NSEvent *)event     { [self updateMousePosition:event]; }
+- (void)rightMouseDragged:(NSEvent *)event { [self updateMousePosition:event]; }
+- (void)otherMouseDragged:(NSEvent *)event { [self updateMousePosition:event]; }
+
+- (void)mouseDown:(NSEvent *)event {
+    [self updateMousePosition:event];
+    if (s_current_input) s_current_input->mouse_left_pressed = true;
+}
+- (void)rightMouseDown:(NSEvent *)event {
+    [self updateMousePosition:event];
+    if (s_current_input) s_current_input->mouse_right_pressed = true;
+}
+- (void)otherMouseDown:(NSEvent *)event {
+    [self updateMousePosition:event];
+    if (s_current_input) s_current_input->mouse_middle_pressed = true;
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    if (s_current_input) s_current_input->scroll_dy += (float)[event scrollingDeltaY];
 }
 @end
 
@@ -85,6 +125,7 @@ bool platform_init(int width, int height, const char *title) {
     state.ns_view = [[LibcgView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
     [state.ns_window setContentView:state.ns_view];
     [state.ns_window makeFirstResponder:state.ns_view];
+    [state.ns_window setAcceptsMouseMovedEvents:YES];
 
     state.fb = create_framebuffer(width, height);
     s_public_fb.pixels = state.fb.pixels;
@@ -106,10 +147,17 @@ void platform_shutdown(void) {
 
 void platform_poll_events(platform_input_t *input) {
     *input = (platform_input_t){0};
+    /* carry persistent state forward */
+    input->mouse_x = s_persistent.mouse_x;
+    input->mouse_y = s_persistent.mouse_y;
 
     s_current_input = input;
     pump_events(state.ns_app);
     s_current_input = NULL;
+
+    /* update persistent state */
+    s_persistent.mouse_x = input->mouse_x;
+    s_persistent.mouse_y = input->mouse_y;
 
     input->quit_requested = !state.running;
 }
