@@ -21,8 +21,12 @@ typedef enum {
     PLATFORM_KEY_3,
     PLATFORM_KEY_4,
     PLATFORM_KEY_B,
+    PLATFORM_KEY_ENTER,
+    PLATFORM_KEY_BACKSPACE,
     PLATFORM_KEY_COUNT
 } platform_key_t;
+
+#define PLATFORM_TEXT_BUFFER 16
 
 typedef struct {
     bool  quit_requested;
@@ -34,6 +38,10 @@ typedef struct {
     bool  mouse_right_pressed;
     bool  mouse_middle_pressed;
     float scroll_dy;
+
+    /* text input typed this frame (printable characters only) */
+    char  text[PLATFORM_TEXT_BUFFER];
+    int   text_len;
 } platform_input_t;
 
 /* Lifecycle */

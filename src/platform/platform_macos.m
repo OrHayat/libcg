@@ -29,15 +29,17 @@ static struct {
 
 /* macOS virtual key codes (US layout) */
 enum {
-    KC_Q      = 12,
-    KC_M      = 46,
-    KC_F      = 3,
-    KC_ESCAPE = 53,
-    KC_1      = 18,
-    KC_2      = 19,
-    KC_3      = 20,
-    KC_4      = 21,
-    KC_B      = 11,
+    KC_Q         = 12,
+    KC_M         = 46,
+    KC_F         = 3,
+    KC_ESCAPE    = 53,
+    KC_1         = 18,
+    KC_2         = 19,
+    KC_3         = 20,
+    KC_4         = 21,
+    KC_B         = 11,
+    KC_ENTER     = 36,
+    KC_BACKSPACE = 51,
 };
 
 /* --- LibcgView (custom NSView that blits the framebuffer) --- */
@@ -68,16 +70,31 @@ enum {
     if (!s_current_input) return;
     unsigned short keyCode = [event keyCode];
     switch (keyCode) {
-        case KC_Q:      s_current_input->keys_pressed[PLATFORM_KEY_Q]      = true; break;
-        case KC_M:      s_current_input->keys_pressed[PLATFORM_KEY_M]      = true; break;
-        case KC_F:      s_current_input->keys_pressed[PLATFORM_KEY_F]      = true; break;
-        case KC_ESCAPE: s_current_input->keys_pressed[PLATFORM_KEY_ESCAPE] = true; break;
-        case KC_1:      s_current_input->keys_pressed[PLATFORM_KEY_1]      = true; break;
-        case KC_2:      s_current_input->keys_pressed[PLATFORM_KEY_2]      = true; break;
-        case KC_3:      s_current_input->keys_pressed[PLATFORM_KEY_3]      = true; break;
-        case KC_4:      s_current_input->keys_pressed[PLATFORM_KEY_4]      = true; break;
-        case KC_B:      s_current_input->keys_pressed[PLATFORM_KEY_B]      = true; break;
+        case KC_Q:         s_current_input->keys_pressed[PLATFORM_KEY_Q]         = true; break;
+        case KC_M:         s_current_input->keys_pressed[PLATFORM_KEY_M]         = true; break;
+        case KC_F:         s_current_input->keys_pressed[PLATFORM_KEY_F]         = true; break;
+        case KC_ESCAPE:    s_current_input->keys_pressed[PLATFORM_KEY_ESCAPE]    = true; break;
+        case KC_1:         s_current_input->keys_pressed[PLATFORM_KEY_1]         = true; break;
+        case KC_2:         s_current_input->keys_pressed[PLATFORM_KEY_2]         = true; break;
+        case KC_3:         s_current_input->keys_pressed[PLATFORM_KEY_3]         = true; break;
+        case KC_4:         s_current_input->keys_pressed[PLATFORM_KEY_4]         = true; break;
+        case KC_B:         s_current_input->keys_pressed[PLATFORM_KEY_B]         = true; break;
+        case KC_ENTER:     s_current_input->keys_pressed[PLATFORM_KEY_ENTER]     = true; break;
+        case KC_BACKSPACE: s_current_input->keys_pressed[PLATFORM_KEY_BACKSPACE] = true; break;
         default: break;
+    }
+
+    /* Capture printable characters into the text input buffer */
+    NSString *chars = [event characters];
+    if (chars && [chars length] > 0) {
+        const char *cstr = [chars UTF8String];
+        for (const char *p = cstr; *p && s_current_input->text_len < PLATFORM_TEXT_BUFFER - 1; p++) {
+            unsigned char c = (unsigned char)*p;
+            if (c >= 0x20 && c < 0x7F) {
+                s_current_input->text[s_current_input->text_len++] = (char)c;
+            }
+        }
+        s_current_input->text[s_current_input->text_len] = '\0';
     }
 }
 
