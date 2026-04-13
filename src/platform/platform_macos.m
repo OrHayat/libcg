@@ -17,6 +17,7 @@ static platform_state_t state;
 /* --- Forward declarations of private helpers --- */
 
 static NSApplication *create_application(void);
+static NSMenu        *create_menu(const char *title);
 static NSWindow      *create_window(int w, int h, const char *title, id delegate);
 static void           activate_app(NSApplication *app);
 static void           pump_events(NSApplication *app);
@@ -28,6 +29,8 @@ bool platform_init(int width, int height, const char *title) {
 
     AppDelegate *delegate = [[AppDelegate alloc] init];
     [state.ns_app setDelegate:delegate];
+
+    [state.ns_app setMainMenu:create_menu(title)];
 
     state.ns_window = create_window(width, height, title, delegate);
 
@@ -72,6 +75,26 @@ static NSApplication *create_application(void) {
     NSApplication *app = [NSApplication sharedApplication];
     [app setActivationPolicy:NSApplicationActivationPolicyRegular];
     return app;
+}
+
+// Build a minimal menu bar: one app menu with a Quit item bound to Cmd-Q.
+// Caller is responsible for installing it via setMainMenu:.
+static NSMenu *create_menu(const char *title) {
+    // top bar + first slot (AppKit auto-labels this with the app name)
+    NSMenu *menubar = [[NSMenu alloc] init];
+    NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
+    [menubar addItem:appMenuItem];
+
+    // dropdown that hangs off the app slot, with just "Quit <title>" in it
+    NSMenu *appMenu = [[NSMenu alloc] init];
+    NSString *quitTitle = [NSString stringWithFormat:@"Quit %s", title];
+    NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:quitTitle
+                                                      action:@selector(terminate:)
+                                               keyEquivalent:@"q"];
+    [appMenu addItem:quitItem];
+    [appMenuItem setSubmenu:appMenu];
+
+    return menubar;
 }
 
 static NSWindow *create_window(int width, int height, const char *title, id delegate) {
