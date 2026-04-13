@@ -41,6 +41,16 @@ static void render_noise(platform_framebuffer_t *fb) {
     }
 }
 
+static void render_checkerboard(platform_framebuffer_t *fb) {
+    int cell = 32;
+    for (int y = 0; y < fb->height; y++) {
+        for (int x = 0; x < fb->width; x++) {
+            bool light = (((x / cell) + (y / cell)) & 1) == 0;
+            fb->pixels[y * fb->width + x] = light ? RGB(220, 220, 220) : RGB(160, 160, 160);
+        }
+    }
+}
+
 int main(void) {
     if (!platform_init(1280, 720, "libcg")) {
         fprintf(stderr, "Failed to initialize platform\n");
@@ -48,6 +58,7 @@ int main(void) {
     }
 
     bool print_mouse_coords = false;
+    bool bg_checkerboard    = false;
     int  last_mx = -1, last_my = -1;
     pattern_t pattern = PATTERN_SOLID;
     int  frame_count = 0;
@@ -71,6 +82,10 @@ int main(void) {
         if (input.keys_pressed[PLATFORM_KEY_2]) pattern = PATTERN_GRADIENT;
         if (input.keys_pressed[PLATFORM_KEY_3]) pattern = PATTERN_CYCLE;
         if (input.keys_pressed[PLATFORM_KEY_4]) pattern = PATTERN_NOISE;
+        if (input.keys_pressed[PLATFORM_KEY_B]) {
+            bg_checkerboard = !bg_checkerboard;
+            printf("background: %s\n", bg_checkerboard ? "checkerboard" : "transparent");
+        }
 
         if (print_mouse_coords && (input.mouse_x != last_mx || input.mouse_y != last_my)) {
             printf("mouse: (%d, %d)\n", input.mouse_x, input.mouse_y);
@@ -88,6 +103,7 @@ int main(void) {
             printf("scroll dy: %f\n", (double)input.scroll_dy);
 
         platform_framebuffer_t *fb = platform_get_framebuffer();
+        if (bg_checkerboard) render_checkerboard(fb);
         switch (pattern) {
             case PATTERN_SOLID:    render_solid(fb); break;
             case PATTERN_GRADIENT: render_gradient(fb); break;
