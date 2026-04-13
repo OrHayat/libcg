@@ -208,6 +208,10 @@ int main(void) {
                 bg_checkerboard = !bg_checkerboard;
                 printf("background: %s\n", bg_checkerboard ? "checkerboard" : "transparent");
             }
+            if (input.keys_pressed[PLATFORM_KEY_T]) {
+                platform_framebuffer_t *fbi = platform_get_framebuffer();
+                printf("framebuffer: %dx%d\n", fbi->width, fbi->height);
+            }
         }
 
         /* Mouse output is suppressed while typing a color — otherwise it
