@@ -12,9 +12,12 @@ int main(void) {
         fb->pixels[i] = 0xFFFF8800;  /* AARRGGBB - solid orange */
     }
 
-    bool quit = false;
-    while (!quit) {
-        platform_poll_events(&quit);
+    platform_input_t input = {0};
+    while (!input.quit_requested) {
+        platform_poll_events(&input);
+        if (input.keys_pressed[PLATFORM_KEY_Q]) {
+            input.quit_requested = true;
+        }
         platform_present();
     }
 
