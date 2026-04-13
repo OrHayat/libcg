@@ -29,8 +29,10 @@ static struct {
 
 /* macOS virtual key codes (US layout) */
 enum {
-    KC_Q = 12,
-    KC_M = 46,
+    KC_Q      = 12,
+    KC_M      = 46,
+    KC_F      = 3,
+    KC_ESCAPE = 53,
 };
 
 /* --- LibcgView (custom NSView that blits the framebuffer) --- */
@@ -61,8 +63,10 @@ enum {
     if (!s_current_input) return;
     unsigned short keyCode = [event keyCode];
     switch (keyCode) {
-        case KC_Q: s_current_input->keys_pressed[PLATFORM_KEY_Q] = true; break;
-        case KC_M: s_current_input->keys_pressed[PLATFORM_KEY_M] = true; break;
+        case KC_Q:      s_current_input->keys_pressed[PLATFORM_KEY_Q]      = true; break;
+        case KC_M:      s_current_input->keys_pressed[PLATFORM_KEY_M]      = true; break;
+        case KC_F:      s_current_input->keys_pressed[PLATFORM_KEY_F]      = true; break;
+        case KC_ESCAPE: s_current_input->keys_pressed[PLATFORM_KEY_ESCAPE] = true; break;
         default: break;
     }
 }
@@ -316,4 +320,12 @@ static void pump_events(NSApplication *app) {
             [app sendEvent:event];
         }
     }
+}
+
+void platform_toggle_fullscreen(void) {
+    [state.ns_window toggleFullScreen:nil];
+}
+
+bool platform_is_fullscreen(void) {
+    return ([state.ns_window styleMask] & NSWindowStyleMaskFullScreen) != 0;
 }

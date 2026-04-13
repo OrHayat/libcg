@@ -14,6 +14,8 @@ typedef enum {
     PLATFORM_KEY_NONE = 0,
     PLATFORM_KEY_Q,
     PLATFORM_KEY_M,
+    PLATFORM_KEY_F,
+    PLATFORM_KEY_ESCAPE,
     PLATFORM_KEY_COUNT
 } platform_key_t;
 
@@ -39,5 +41,9 @@ void platform_present(void);
 
 /* Accessors */
 platform_framebuffer_t *platform_get_framebuffer(void);
+
+/* Window controls */
+void platform_toggle_fullscreen(void);
+bool platform_is_fullscreen(void);
 
 #endif /* PLATFORM_H */
