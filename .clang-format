@@ -1,0 +1,10 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+ObjCBlockIndentWidth: 4
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: None
+PointerAlignment: Right
+ObjCSpaceAfterProperty: true
+ObjCSpaceBeforeProtocolList: true
+BreakBeforeBinaryOperators: NonAssignment
