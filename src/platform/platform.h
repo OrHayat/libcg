@@ -13,12 +13,20 @@ typedef struct {
 typedef enum {
     PLATFORM_KEY_NONE = 0,
     PLATFORM_KEY_Q,
+    PLATFORM_KEY_M,
     PLATFORM_KEY_COUNT
 } platform_key_t;
 
 typedef struct {
-    bool quit_requested;
-    bool keys_pressed[PLATFORM_KEY_COUNT];
+    bool  quit_requested;
+    bool  keys_pressed[PLATFORM_KEY_COUNT];
+
+    /* mouse — position is persistent, button presses + scroll are edge-triggered */
+    int   mouse_x, mouse_y;
+    bool  mouse_left_pressed;
+    bool  mouse_right_pressed;
+    bool  mouse_middle_pressed;
+    float scroll_dy;
 } platform_input_t;
 
 /* Lifecycle */
