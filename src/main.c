@@ -7,11 +7,6 @@ int main(void) {
         return 1;
     }
 
-    platform_framebuffer_t *fb = platform_get_framebuffer();
-    for (int i = 0; i < fb->width * fb->height; i++) {
-        fb->pixels[i] = 0xFFFF8800;  /* AARRGGBB - solid orange */
-    }
-
     bool print_mouse_coords = false;
     int  last_mx = -1, last_my = -1;
 
@@ -39,6 +34,11 @@ int main(void) {
             printf("mouse middle down at (%d, %d)\n", input.mouse_x, input.mouse_y);
         if (input.scroll_dy != 0.0f)
             printf("scroll dy: %f\n", (double)input.scroll_dy);
+
+        platform_framebuffer_t *fb = platform_get_framebuffer();
+        for (int i = 0; i < fb->width * fb->height; i++) {
+            fb->pixels[i] = 0xFFFF8800;  /* AARRGGBB - solid orange */
+        }
 
         platform_present();
     }
