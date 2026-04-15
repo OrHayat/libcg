@@ -19,6 +19,12 @@ int main(void) {
             print_mouse_coords = !print_mouse_coords;
             printf("mouse coord printing: %s\n", print_mouse_coords ? "ON" : "OFF");
         }
+        if (input.keys_pressed[PLATFORM_KEY_F]) {
+            platform_toggle_fullscreen();
+        }
+        if (input.keys_pressed[PLATFORM_KEY_ESCAPE] && platform_is_fullscreen()) {
+            platform_toggle_fullscreen();
+        }
 
         if (print_mouse_coords && (input.mouse_x != last_mx || input.mouse_y != last_my)) {
             printf("mouse: (%d, %d)\n", input.mouse_x, input.mouse_y);
