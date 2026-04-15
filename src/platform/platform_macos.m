@@ -18,8 +18,14 @@ typedef struct {
     bool           running;
 } platform_state_t;
 
-static platform_state_t       state;
-static platform_framebuffer_t s_public_fb;
+static platform_state_t        state;
+static platform_framebuffer_t  s_public_fb;
+static platform_input_t       *s_current_input;
+
+/* macOS virtual key codes (US layout) */
+enum {
+    KC_Q = 12,
+};
 
 /* --- LibcgView (custom NSView that blits the framebuffer) --- */
 
@@ -35,6 +41,19 @@ static platform_framebuffer_t s_public_fb;
     CGImageRef image = CGBitmapContextCreateImage(state.fb.context);
     CGContextDrawImage(cg, [self bounds], image);
     CGImageRelease(image);
+}
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (void)keyDown:(NSEvent *)event {
+    if (!s_current_input) return;
+    unsigned short keyCode = [event keyCode];
+    switch (keyCode) {
+        case KC_Q: s_current_input->keys_pressed[PLATFORM_KEY_Q] = true; break;
+        default: break;
+    }
 }
 @end
 
@@ -65,6 +84,7 @@ bool platform_init(int width, int height, const char *title) {
 
     state.ns_view = [[LibcgView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
     [state.ns_window setContentView:state.ns_view];
+    [state.ns_window makeFirstResponder:state.ns_view];
 
     state.fb = create_framebuffer(width, height);
     s_public_fb.pixels = state.fb.pixels;
@@ -84,9 +104,14 @@ void platform_shutdown(void) {
     state.running = false;
 }
 
-void platform_poll_events(bool *quit_requested) {
+void platform_poll_events(platform_input_t *input) {
+    *input = (platform_input_t){0};
+
+    s_current_input = input;
     pump_events(state.ns_app);
-    *quit_requested = !state.running;
+    s_current_input = NULL;
+
+    input->quit_requested = !state.running;
 }
 
 void platform_present(void) {
