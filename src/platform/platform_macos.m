@@ -37,6 +37,7 @@ enum {
     KC_2      = 19,
     KC_3      = 20,
     KC_4      = 21,
+    KC_B      = 11,
 };
 
 /* --- LibcgView (custom NSView that blits the framebuffer) --- */
@@ -75,6 +76,7 @@ enum {
         case KC_2:      s_current_input->keys_pressed[PLATFORM_KEY_2]      = true; break;
         case KC_3:      s_current_input->keys_pressed[PLATFORM_KEY_3]      = true; break;
         case KC_4:      s_current_input->keys_pressed[PLATFORM_KEY_4]      = true; break;
+        case KC_B:      s_current_input->keys_pressed[PLATFORM_KEY_B]      = true; break;
         default: break;
     }
 }
@@ -258,6 +260,8 @@ static NSWindow *create_window(int width, int height, const char *title, id dele
     [window setTitle:[NSString stringWithUTF8String:title]];
     [window center];
     [window setDelegate:delegate];
+    [window setOpaque:NO];
+    [window setBackgroundColor:[NSColor clearColor]];
     [window makeKeyAndOrderFront:nil];
     return window;
 }

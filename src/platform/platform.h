@@ -20,6 +20,7 @@ typedef enum {
     PLATFORM_KEY_2,
     PLATFORM_KEY_3,
     PLATFORM_KEY_4,
+    PLATFORM_KEY_B,
     PLATFORM_KEY_COUNT
 } platform_key_t;
 
