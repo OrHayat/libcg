@@ -33,6 +33,10 @@ enum {
     KC_M      = 46,
     KC_F      = 3,
     KC_ESCAPE = 53,
+    KC_1      = 18,
+    KC_2      = 19,
+    KC_3      = 20,
+    KC_4      = 21,
 };
 
 /* --- LibcgView (custom NSView that blits the framebuffer) --- */
@@ -67,6 +71,10 @@ enum {
         case KC_M:      s_current_input->keys_pressed[PLATFORM_KEY_M]      = true; break;
         case KC_F:      s_current_input->keys_pressed[PLATFORM_KEY_F]      = true; break;
         case KC_ESCAPE: s_current_input->keys_pressed[PLATFORM_KEY_ESCAPE] = true; break;
+        case KC_1:      s_current_input->keys_pressed[PLATFORM_KEY_1]      = true; break;
+        case KC_2:      s_current_input->keys_pressed[PLATFORM_KEY_2]      = true; break;
+        case KC_3:      s_current_input->keys_pressed[PLATFORM_KEY_3]      = true; break;
+        case KC_4:      s_current_input->keys_pressed[PLATFORM_KEY_4]      = true; break;
         default: break;
     }
 }
