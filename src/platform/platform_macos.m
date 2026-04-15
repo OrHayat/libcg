@@ -38,6 +38,7 @@ enum {
     KC_3         = 20,
     KC_4         = 21,
     KC_B         = 11,
+    KC_T         = 17,
     KC_ENTER     = 36,
     KC_BACKSPACE = 51,
 };
@@ -79,6 +80,7 @@ enum {
         case KC_3:         s_current_input->keys_pressed[PLATFORM_KEY_3]         = true; break;
         case KC_4:         s_current_input->keys_pressed[PLATFORM_KEY_4]         = true; break;
         case KC_B:         s_current_input->keys_pressed[PLATFORM_KEY_B]         = true; break;
+        case KC_T:         s_current_input->keys_pressed[PLATFORM_KEY_T]         = true; break;
         case KC_ENTER:     s_current_input->keys_pressed[PLATFORM_KEY_ENTER]     = true; break;
         case KC_BACKSPACE: s_current_input->keys_pressed[PLATFORM_KEY_BACKSPACE] = true; break;
         default: break;
