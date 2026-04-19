@@ -60,12 +60,15 @@ typedef struct {
     bool quit_requested;
 } platform_input_t;
 
-#define platform_is_key_down(input, k) \
-    ((input)->keys[k].ended_down)
-#define platform_is_key_pressed(input, k) \
-    ((input)->keys[k].half_transition_count >= 1 && (input)->keys[k].ended_down)
-#define platform_is_key_released(input, k) \
-    ((input)->keys[k].half_transition_count >= 1 && !(input)->keys[k].ended_down)
+static inline bool platform_is_key_down(const platform_input_t *input, platform_key_t k) {
+    return input->keys[k].ended_down;
+}
+static inline bool platform_is_key_pressed(const platform_input_t *input, platform_key_t k) {
+    return input->keys[k].half_transition_count >= 1 && input->keys[k].ended_down;
+}
+static inline bool platform_is_key_released(const platform_input_t *input, platform_key_t k) {
+    return input->keys[k].half_transition_count >= 1 && !input->keys[k].ended_down;
+}
 
 /* Lifecycle */
 bool platform_init(int width, int height, const char *title);
