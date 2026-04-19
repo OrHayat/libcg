@@ -94,6 +94,10 @@ static const platform_key_t kc_to_key[256] = {
     CGImageRelease(image);
 }
 
+- (BOOL)isFlipped {
+    return YES;  /* top-left origin to match framebuffer */
+}
+
 // Required for the view to receive keyboard events. Without this, AppKit
 // sends key events to the window's field editor instead.
 - (BOOL)acceptsFirstResponder {
@@ -153,6 +157,53 @@ static const platform_key_t kc_to_key[256] = {
         state.pending.keys[key].ended_down = is_down;
     }
 }
+
+- (void)updateMousePosition:(NSEvent *)event {
+    NSPoint local = [self convertPoint:[event locationInWindow] fromView:nil];
+    state.pending.mouse.x = (int)local.x;
+    state.pending.mouse.y = (int)local.y;
+}
+
+- (void)mouseMoved:(NSEvent *)event       { [self updateMousePosition:event]; }
+- (void)mouseDragged:(NSEvent *)event     { [self updateMousePosition:event]; }
+- (void)rightMouseDragged:(NSEvent *)event { [self updateMousePosition:event]; }
+- (void)otherMouseDragged:(NSEvent *)event { [self updateMousePosition:event]; }
+
+- (void)mouseDown:(NSEvent *)event {
+    [self updateMousePosition:event];
+    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].ended_down = true;
+}
+- (void)mouseUp:(NSEvent *)event {
+    [self updateMousePosition:event];
+    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].ended_down = false;
+}
+- (void)rightMouseDown:(NSEvent *)event {
+    [self updateMousePosition:event];
+    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].ended_down = true;
+}
+- (void)rightMouseUp:(NSEvent *)event {
+    [self updateMousePosition:event];
+    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].ended_down = false;
+}
+- (void)otherMouseDown:(NSEvent *)event {
+    [self updateMousePosition:event];
+    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].ended_down = true;
+}
+- (void)otherMouseUp:(NSEvent *)event {
+    [self updateMousePosition:event];
+    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].ended_down = false;
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    state.pending.mouse.scroll_dx += (float)[event scrollingDeltaX];
+    state.pending.mouse.scroll_dy += (float)[event scrollingDeltaY];
+}
 @end
 
 @interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
@@ -183,6 +234,7 @@ bool platform_init(int width, int height, const char *title) {
     state.ns_view = [[LibcgView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
     [state.ns_window setContentView:state.ns_view];
     [state.ns_window makeFirstResponder:state.ns_view];
+    [state.ns_window setAcceptsMouseMovedEvents:YES];
 
     state.fb = create_framebuffer(width, height);
 
@@ -200,9 +252,14 @@ void platform_shutdown(void) {
 }
 
 void platform_poll_events(platform_input_t *input) {
-    // Reset transition counts but preserve held state from previous frame.
+    // Reset per-frame transition counts, preserve held state.
     for (int i = 0; i < PLATFORM_KEY_COUNT; i++)
         state.pending.keys[i].half_transition_count = 0;
+    for (int i = 0; i < PLATFORM_MOUSE_COUNT; i++)
+        state.pending.mouse.buttons[i].half_transition_count = 0;
+    state.pending.mouse.scroll_dx = 0.0f;
+    state.pending.mouse.scroll_dy = 0.0f;
+    // mouse_x, mouse_y persist in state.pending across frames.
 
     pump_events(state.ns_app);
 
