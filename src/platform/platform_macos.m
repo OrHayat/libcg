@@ -94,10 +94,14 @@ static const platform_key_t kc_to_key[256] = {
     CGImageRelease(image);
 }
 
+// Required for the view to receive keyboard events. Without this, AppKit
+// sends key events to the window's field editor instead.
 - (BOOL)acceptsFirstResponder {
     return YES;
 }
 
+// Record key-down transition. Repeats are filtered — we track physical
+// press/release, not the OS auto-repeat stream.
 - (void)keyDown:(NSEvent *)event {
     if ([event isARepeat])
         return;
@@ -108,6 +112,7 @@ static const platform_key_t kc_to_key[256] = {
     state.pending.keys[key].ended_down = true;
 }
 
+// Record key-up transition.
 - (void)keyUp:(NSEvent *)event {
     platform_key_t key = kc_to_key[[event keyCode] & 0xFF];
     if (key == PLATFORM_KEY_UNKNOWN)
@@ -116,6 +121,10 @@ static const platform_key_t kc_to_key[256] = {
     state.pending.keys[key].ended_down = false;
 }
 
+// Modifier keys (shift, ctrl, alt, cmd, caps lock) don't fire keyDown:/keyUp:.
+// AppKit sends flagsChanged: instead. We use device-specific masks (NX_DEVICE*)
+// from IOKit to distinguish left from right modifiers — the high-level
+// NSEventModifierFlag* constants merge both sides into one bit.
 // clang-format off
 - (void)flagsChanged:(NSEvent *)event {
     unsigned short keyCode = [event keyCode] & 0xFF;
