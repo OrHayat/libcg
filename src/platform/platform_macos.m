@@ -171,18 +171,37 @@ static const platform_key_t kc_to_key[256] = {
 
 - (void)mouseDown:(NSEvent *)event {
     [self updateMousePosition:event];
-    state.pending.mouse_left_pressed = true;
+    state.pending.mouse_buttons[PLATFORM_MOUSE_LEFT].half_transition_count++;
+    state.pending.mouse_buttons[PLATFORM_MOUSE_LEFT].ended_down = true;
+}
+- (void)mouseUp:(NSEvent *)event {
+    [self updateMousePosition:event];
+    state.pending.mouse_buttons[PLATFORM_MOUSE_LEFT].half_transition_count++;
+    state.pending.mouse_buttons[PLATFORM_MOUSE_LEFT].ended_down = false;
 }
 - (void)rightMouseDown:(NSEvent *)event {
     [self updateMousePosition:event];
-    state.pending.mouse_right_pressed = true;
+    state.pending.mouse_buttons[PLATFORM_MOUSE_RIGHT].half_transition_count++;
+    state.pending.mouse_buttons[PLATFORM_MOUSE_RIGHT].ended_down = true;
+}
+- (void)rightMouseUp:(NSEvent *)event {
+    [self updateMousePosition:event];
+    state.pending.mouse_buttons[PLATFORM_MOUSE_RIGHT].half_transition_count++;
+    state.pending.mouse_buttons[PLATFORM_MOUSE_RIGHT].ended_down = false;
 }
 - (void)otherMouseDown:(NSEvent *)event {
     [self updateMousePosition:event];
-    state.pending.mouse_middle_pressed = true;
+    state.pending.mouse_buttons[PLATFORM_MOUSE_MIDDLE].half_transition_count++;
+    state.pending.mouse_buttons[PLATFORM_MOUSE_MIDDLE].ended_down = true;
+}
+- (void)otherMouseUp:(NSEvent *)event {
+    [self updateMousePosition:event];
+    state.pending.mouse_buttons[PLATFORM_MOUSE_MIDDLE].half_transition_count++;
+    state.pending.mouse_buttons[PLATFORM_MOUSE_MIDDLE].ended_down = false;
 }
 
 - (void)scrollWheel:(NSEvent *)event {
+    state.pending.scroll_dx += (float)[event scrollingDeltaX];
     state.pending.scroll_dy += (float)[event scrollingDeltaY];
 }
 @end
@@ -233,12 +252,12 @@ void platform_shutdown(void) {
 }
 
 void platform_poll_events(platform_input_t *input) {
-    // Reset per-frame edge-triggered state, preserve persistent state.
+    // Reset per-frame transition counts, preserve held state.
     for (int i = 0; i < PLATFORM_KEY_COUNT; i++)
         state.pending.keys[i].half_transition_count = 0;
-    state.pending.mouse_left_pressed = false;
-    state.pending.mouse_right_pressed = false;
-    state.pending.mouse_middle_pressed = false;
+    for (int i = 0; i < PLATFORM_MOUSE_COUNT; i++)
+        state.pending.mouse_buttons[i].half_transition_count = 0;
+    state.pending.scroll_dx = 0.0f;
     state.pending.scroll_dy = 0.0f;
     // mouse_x, mouse_y persist in state.pending across frames.
 

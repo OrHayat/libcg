@@ -55,16 +55,19 @@ typedef struct {
     bool ended_down;
 } platform_button_t;
 
+typedef enum {
+    PLATFORM_MOUSE_LEFT   = 0,
+    PLATFORM_MOUSE_RIGHT  = 1,
+    PLATFORM_MOUSE_MIDDLE = 2,
+    PLATFORM_MOUSE_COUNT
+} platform_mouse_button_t;
+
 typedef struct {
     platform_button_t keys[PLATFORM_KEY_COUNT];
-    bool quit_requested;
-
-    /* mouse — position is persistent, button presses + scroll are edge-triggered */
+    platform_button_t mouse_buttons[PLATFORM_MOUSE_COUNT];
     int   mouse_x, mouse_y;
-    bool  mouse_left_pressed;
-    bool  mouse_right_pressed;
-    bool  mouse_middle_pressed;
-    float scroll_dy;
+    float scroll_dx, scroll_dy;
+    bool  quit_requested;
 } platform_input_t;
 
 static inline bool platform_is_key_down(const platform_input_t *input, platform_key_t k) {
@@ -75,6 +78,16 @@ static inline bool platform_is_key_pressed(const platform_input_t *input, platfo
 }
 static inline bool platform_is_key_released(const platform_input_t *input, platform_key_t k) {
     return input->keys[k].half_transition_count >= 1 && !input->keys[k].ended_down;
+}
+
+static inline bool platform_is_mouse_down(const platform_input_t *input, platform_mouse_button_t b) {
+    return input->mouse_buttons[b].ended_down;
+}
+static inline bool platform_is_mouse_pressed(const platform_input_t *input, platform_mouse_button_t b) {
+    return input->mouse_buttons[b].half_transition_count >= 1 && input->mouse_buttons[b].ended_down;
+}
+static inline bool platform_is_mouse_released(const platform_input_t *input, platform_mouse_button_t b) {
+    return input->mouse_buttons[b].half_transition_count >= 1 && !input->mouse_buttons[b].ended_down;
 }
 
 /* Lifecycle */
