@@ -160,8 +160,8 @@ static const platform_key_t kc_to_key[256] = {
 
 - (void)updateMousePosition:(NSEvent *)event {
     NSPoint local = [self convertPoint:[event locationInWindow] fromView:nil];
-    state.pending.mouse_x = (int)local.x;
-    state.pending.mouse_y = (int)local.y;
+    state.pending.mouse.x = (int)local.x;
+    state.pending.mouse.y = (int)local.y;
 }
 
 - (void)mouseMoved:(NSEvent *)event       { [self updateMousePosition:event]; }
@@ -171,38 +171,38 @@ static const platform_key_t kc_to_key[256] = {
 
 - (void)mouseDown:(NSEvent *)event {
     [self updateMousePosition:event];
-    state.pending.mouse_buttons[PLATFORM_MOUSE_LEFT].half_transition_count++;
-    state.pending.mouse_buttons[PLATFORM_MOUSE_LEFT].ended_down = true;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].ended_down = true;
 }
 - (void)mouseUp:(NSEvent *)event {
     [self updateMousePosition:event];
-    state.pending.mouse_buttons[PLATFORM_MOUSE_LEFT].half_transition_count++;
-    state.pending.mouse_buttons[PLATFORM_MOUSE_LEFT].ended_down = false;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].ended_down = false;
 }
 - (void)rightMouseDown:(NSEvent *)event {
     [self updateMousePosition:event];
-    state.pending.mouse_buttons[PLATFORM_MOUSE_RIGHT].half_transition_count++;
-    state.pending.mouse_buttons[PLATFORM_MOUSE_RIGHT].ended_down = true;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].ended_down = true;
 }
 - (void)rightMouseUp:(NSEvent *)event {
     [self updateMousePosition:event];
-    state.pending.mouse_buttons[PLATFORM_MOUSE_RIGHT].half_transition_count++;
-    state.pending.mouse_buttons[PLATFORM_MOUSE_RIGHT].ended_down = false;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].ended_down = false;
 }
 - (void)otherMouseDown:(NSEvent *)event {
     [self updateMousePosition:event];
-    state.pending.mouse_buttons[PLATFORM_MOUSE_MIDDLE].half_transition_count++;
-    state.pending.mouse_buttons[PLATFORM_MOUSE_MIDDLE].ended_down = true;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].ended_down = true;
 }
 - (void)otherMouseUp:(NSEvent *)event {
     [self updateMousePosition:event];
-    state.pending.mouse_buttons[PLATFORM_MOUSE_MIDDLE].half_transition_count++;
-    state.pending.mouse_buttons[PLATFORM_MOUSE_MIDDLE].ended_down = false;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].half_transition_count++;
+    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].ended_down = false;
 }
 
 - (void)scrollWheel:(NSEvent *)event {
-    state.pending.scroll_dx += (float)[event scrollingDeltaX];
-    state.pending.scroll_dy += (float)[event scrollingDeltaY];
+    state.pending.mouse.scroll_dx += (float)[event scrollingDeltaX];
+    state.pending.mouse.scroll_dy += (float)[event scrollingDeltaY];
 }
 @end
 
@@ -256,9 +256,9 @@ void platform_poll_events(platform_input_t *input) {
     for (int i = 0; i < PLATFORM_KEY_COUNT; i++)
         state.pending.keys[i].half_transition_count = 0;
     for (int i = 0; i < PLATFORM_MOUSE_COUNT; i++)
-        state.pending.mouse_buttons[i].half_transition_count = 0;
-    state.pending.scroll_dx = 0.0f;
-    state.pending.scroll_dy = 0.0f;
+        state.pending.mouse.buttons[i].half_transition_count = 0;
+    state.pending.mouse.scroll_dx = 0.0f;
+    state.pending.mouse.scroll_dy = 0.0f;
     // mouse_x, mouse_y persist in state.pending across frames.
 
     pump_events(state.ns_app);

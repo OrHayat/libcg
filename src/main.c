@@ -26,26 +26,26 @@ int main(void) {
             printf("mouse coord printing: %s\n", print_mouse_coords ? "ON" : "OFF");
         }
 
-        if (print_mouse_coords && (input.mouse_x != last_mx || input.mouse_y != last_my)) {
-            printf("mouse: (%d, %d)\n", input.mouse_x, input.mouse_y);
-            last_mx = input.mouse_x;
-            last_my = input.mouse_y;
+        if (print_mouse_coords && (input.mouse.x != last_mx || input.mouse.y != last_my)) {
+            printf("mouse: (%d, %d)\n", input.mouse.x, input.mouse.y);
+            last_mx = input.mouse.x;
+            last_my = input.mouse.y;
         }
 
         if (platform_is_mouse_pressed(&input, PLATFORM_MOUSE_LEFT))
-            printf("mouse left pressed at (%d, %d)\n", input.mouse_x, input.mouse_y);
+            printf("mouse left pressed at (%d, %d)\n", input.mouse.x, input.mouse.y);
         if (platform_is_mouse_released(&input, PLATFORM_MOUSE_LEFT))
-            printf("mouse left released at (%d, %d)\n", input.mouse_x, input.mouse_y);
+            printf("mouse left released at (%d, %d)\n", input.mouse.x, input.mouse.y);
         if (platform_is_mouse_pressed(&input, PLATFORM_MOUSE_RIGHT))
-            printf("mouse right pressed at (%d, %d)\n", input.mouse_x, input.mouse_y);
+            printf("mouse right pressed at (%d, %d)\n", input.mouse.x, input.mouse.y);
         if (platform_is_mouse_released(&input, PLATFORM_MOUSE_RIGHT))
-            printf("mouse right released at (%d, %d)\n", input.mouse_x, input.mouse_y);
+            printf("mouse right released at (%d, %d)\n", input.mouse.x, input.mouse.y);
         if (platform_is_mouse_pressed(&input, PLATFORM_MOUSE_MIDDLE))
-            printf("mouse middle pressed at (%d, %d)\n", input.mouse_x, input.mouse_y);
+            printf("mouse middle pressed at (%d, %d)\n", input.mouse.x, input.mouse.y);
         if (platform_is_mouse_released(&input, PLATFORM_MOUSE_MIDDLE))
-            printf("mouse middle released at (%d, %d)\n", input.mouse_x, input.mouse_y);
-        if (input.scroll_dx != 0.0f || input.scroll_dy != 0.0f)
-            printf("scroll: dx=%.1f dy=%.1f\n", (double)input.scroll_dx, (double)input.scroll_dy);
+            printf("mouse middle released at (%d, %d)\n", input.mouse.x, input.mouse.y);
+        if (input.mouse.scroll_dx != 0.0f || input.mouse.scroll_dy != 0.0f)
+            printf("scroll: dx=%.1f dy=%.1f\n", (double)input.mouse.scroll_dx, (double)input.mouse.scroll_dy);
 
         platform_present();
     }

@@ -63,11 +63,15 @@ typedef enum {
 } platform_mouse_button_t;
 
 typedef struct {
-    platform_button_t keys[PLATFORM_KEY_COUNT];
-    platform_button_t mouse_buttons[PLATFORM_MOUSE_COUNT];
-    int   mouse_x, mouse_y;
+    platform_button_t buttons[PLATFORM_MOUSE_COUNT];
+    int   x, y;
     float scroll_dx, scroll_dy;
-    bool  quit_requested;
+} platform_mouse_t;
+
+typedef struct {
+    platform_button_t keys[PLATFORM_KEY_COUNT];
+    platform_mouse_t  mouse;
+    bool quit_requested;
 } platform_input_t;
 
 static inline bool platform_is_key_down(const platform_input_t *input, platform_key_t k) {
@@ -81,13 +85,13 @@ static inline bool platform_is_key_released(const platform_input_t *input, platf
 }
 
 static inline bool platform_is_mouse_down(const platform_input_t *input, platform_mouse_button_t b) {
-    return input->mouse_buttons[b].ended_down;
+    return input->mouse.buttons[b].ended_down;
 }
 static inline bool platform_is_mouse_pressed(const platform_input_t *input, platform_mouse_button_t b) {
-    return input->mouse_buttons[b].half_transition_count >= 1 && input->mouse_buttons[b].ended_down;
+    return input->mouse.buttons[b].half_transition_count >= 1 && input->mouse.buttons[b].ended_down;
 }
 static inline bool platform_is_mouse_released(const platform_input_t *input, platform_mouse_button_t b) {
-    return input->mouse_buttons[b].half_transition_count >= 1 && !input->mouse_buttons[b].ended_down;
+    return input->mouse.buttons[b].half_transition_count >= 1 && !input->mouse.buttons[b].ended_down;
 }
 
 /* Lifecycle */
