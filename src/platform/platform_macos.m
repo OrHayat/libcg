@@ -216,6 +216,7 @@ static NSMenu *create_menu(const char *title);
 static NSWindow *create_window(int w, int h, const char *title, id delegate);
 static framebuffer_t create_framebuffer(int w, int h);
 static void destroy_framebuffer(framebuffer_t *fb);
+static NSSize get_backing_size(NSWindow *window);
 static void activate_app(NSApplication *app);
 static void pump_events(NSApplication *app);
 
@@ -240,7 +241,7 @@ bool platform_init(int width, int height, const char *title) {
     // window size (e.g. 1280×720 logical → 2560×1440 backing at 2× scale).
     // Allocate the framebuffer at backing resolution so we render at native
     // pixel density.
-    NSSize backing = [state.ns_view convertSizeToBacking:NSMakeSize(width, height)];
+    NSSize backing = get_backing_size(state.ns_window);
     state.fb = create_framebuffer((int)backing.width, (int)backing.height);
 
     activate_app(state.ns_app);
@@ -300,9 +301,8 @@ platform_framebuffer_t *platform_get_framebuffer(void) {
 // to the pixel buffer at creation time — there's no way to re-point it at
 // a differently-sized allocation.
 - (void)windowDidResize:(NSNotification *)notification {
-    NSWindow *window = [notification object];
-    NSSize logical = [[window contentView] bounds].size;
-    NSSize backing = [[window contentView] convertSizeToBacking:logical];
+    (void)notification;
+    NSSize backing = get_backing_size(state.ns_window);
 
     destroy_framebuffer(&state.fb);
     state.fb = create_framebuffer((int)backing.width, (int)backing.height);
@@ -313,6 +313,14 @@ platform_framebuffer_t *platform_get_framebuffer(void) {
 @end
 
 /* --- Private helpers --- */
+
+// Return the content area size in backing pixels (physical device pixels).
+// On retina displays this is 2× the logical size.
+static NSSize get_backing_size(NSWindow *window) {
+    NSView *view = [window contentView];
+    NSSize logical = [view bounds].size;
+    return [view convertSizeToBacking:logical];
+}
 
 static NSApplication *create_application(void) {
     NSApplication *app = [NSApplication sharedApplication];
