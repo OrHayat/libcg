@@ -436,3 +436,11 @@ static void pump_events(NSApplication *app) {
         }
     }
 }
+
+void platform_toggle_fullscreen(void) {
+    [state.ns_window toggleFullScreen:nil];
+}
+
+bool platform_is_fullscreen(void) {
+    return ([state.ns_window styleMask] & NSWindowStyleMaskFullScreen) != 0;
+}

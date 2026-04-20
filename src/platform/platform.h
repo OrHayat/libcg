@@ -105,4 +105,8 @@ void platform_present(void);
 /* Accessors */
 platform_framebuffer_t *platform_get_framebuffer(void);
 
+/* Window controls */
+void platform_toggle_fullscreen(void);
+bool platform_is_fullscreen(void);
+
 #endif /* PLATFORM_H */
