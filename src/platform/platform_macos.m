@@ -236,7 +236,12 @@ bool platform_init(int width, int height, const char *title) {
     [state.ns_window makeFirstResponder:state.ns_view];
     [state.ns_window setAcceptsMouseMovedEvents:YES];
 
-    state.fb = create_framebuffer(width, height);
+    // On retina/HiDPI displays the backing store is larger than the logical
+    // window size (e.g. 1280×720 logical → 2560×1440 backing at 2× scale).
+    // Allocate the framebuffer at backing resolution so we render at native
+    // pixel density.
+    NSSize backing = [state.ns_view convertSizeToBacking:NSMakeSize(width, height)];
+    state.fb = create_framebuffer((int)backing.width, (int)backing.height);
 
     activate_app(state.ns_app);
     pump_events(state.ns_app);
@@ -290,6 +295,21 @@ platform_framebuffer_t *platform_get_framebuffer(void) {
     state.running = false;
 }
 
+// Reallocate the framebuffer to match the new window size. We destroy and
+// recreate rather than resize in place because the CGBitmapContext is bound
+// to the pixel buffer at creation time — there's no way to re-point it at
+// a differently-sized allocation.
+- (void)windowDidResize:(NSNotification *)notification {
+    NSWindow *window = [notification object];
+    NSSize logical = [[window contentView] bounds].size;
+    NSSize backing = [[window contentView] convertSizeToBacking:logical];
+
+    destroy_framebuffer(&state.fb);
+    state.fb = create_framebuffer((int)backing.width, (int)backing.height);
+
+    [state.ns_view setNeedsDisplay:YES];
+}
+
 @end
 
 /* --- Private helpers --- */
@@ -324,7 +344,8 @@ static NSWindow *create_window(int width, int height, const char *title, id dele
     // clang-format off
     NSUInteger style = NSWindowStyleMaskTitled
                      | NSWindowStyleMaskClosable
-                     | NSWindowStyleMaskMiniaturizable;
+                     | NSWindowStyleMaskMiniaturizable
+                     | NSWindowStyleMaskResizable;
     // clang-format on
 
     NSRect frame = NSMakeRect(0, 0, width, height);
