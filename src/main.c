@@ -58,10 +58,10 @@ int main(void) {
     }
 
     bool print_mouse_coords = false;
-    bool bg_checkerboard    = false;
-    int  last_mx = -1, last_my = -1;
+    bool bg_checkerboard = false;
+    int last_mx = -1, last_my = -1;
     pattern_t pattern = PATTERN_SOLID;
-    int  frame_count = 0;
+    int frame_count = 0;
 
     platform_input_t input = {0};
     while (!input.quit_requested) {
@@ -77,10 +77,14 @@ int main(void) {
             platform_toggle_fullscreen();
         if (platform_is_key_pressed(&input, PLATFORM_KEY_ESCAPE) && platform_is_fullscreen())
             platform_toggle_fullscreen();
-        if (platform_is_key_pressed(&input, PLATFORM_KEY_1)) pattern = PATTERN_SOLID;
-        if (platform_is_key_pressed(&input, PLATFORM_KEY_2)) pattern = PATTERN_GRADIENT;
-        if (platform_is_key_pressed(&input, PLATFORM_KEY_3)) pattern = PATTERN_CYCLE;
-        if (platform_is_key_pressed(&input, PLATFORM_KEY_4)) pattern = PATTERN_NOISE;
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_1))
+            pattern = PATTERN_SOLID;
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_2))
+            pattern = PATTERN_GRADIENT;
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_3))
+            pattern = PATTERN_CYCLE;
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_4))
+            pattern = PATTERN_NOISE;
         if (platform_is_key_pressed(&input, PLATFORM_KEY_B)) {
             bg_checkerboard = !bg_checkerboard;
             printf("background: %s\n", bg_checkerboard ? "checkerboard" : "transparent");
@@ -105,15 +109,25 @@ int main(void) {
         if (platform_is_mouse_released(&input, PLATFORM_MOUSE_MIDDLE))
             printf("mouse middle released at (%d, %d)\n", input.mouse.x, input.mouse.y);
         if (input.mouse.scroll_dx != 0.0f || input.mouse.scroll_dy != 0.0f)
-            printf("scroll: dx=%.1f dy=%.1f\n", (double)input.mouse.scroll_dx, (double)input.mouse.scroll_dy);
+            printf("scroll: dx=%.1f dy=%.1f\n", (double)input.mouse.scroll_dx,
+                   (double)input.mouse.scroll_dy);
 
         platform_framebuffer_t *fb = platform_get_framebuffer();
-        if (bg_checkerboard) render_checkerboard(fb);
+        if (bg_checkerboard)
+            render_checkerboard(fb);
         switch (pattern) {
-            case PATTERN_SOLID:    render_solid(fb); break;
-            case PATTERN_GRADIENT: render_gradient(fb); break;
-            case PATTERN_CYCLE:    render_cycle(fb, frame_count * 0.05); break;
-            case PATTERN_NOISE:    render_noise(fb); break;
+        case PATTERN_SOLID:
+            render_solid(fb);
+            break;
+        case PATTERN_GRADIENT:
+            render_gradient(fb);
+            break;
+        case PATTERN_CYCLE:
+            render_cycle(fb, frame_count * 0.05);
+            break;
+        case PATTERN_NOISE:
+            render_noise(fb);
+            break;
         }
 
         frame_count++;
