@@ -230,6 +230,7 @@ static NSWindow *create_window(int w, int h, const char *title, id delegate);
 static framebuffer_t create_framebuffer(int w, int h);
 static void destroy_framebuffer(framebuffer_t *fb);
 static NSSize get_backing_size(NSWindow *window);
+static void reallocate_framebuffer(void);
 static void activate_app(NSApplication *app);
 static void pump_events(NSApplication *app);
 
@@ -311,18 +312,18 @@ platform_framebuffer_t *platform_get_framebuffer(void) {
     state.running = false;
 }
 
-// Reallocate the framebuffer to match the new window size. We destroy and
-// recreate rather than resize in place because the CGBitmapContext is bound
-// to the pixel buffer at creation time — there's no way to re-point it at
-// a differently-sized allocation.
 - (void)windowDidResize:(NSNotification *)notification {
     (void)notification;
-    NSSize backing = get_backing_size(state.ns_window);
+    reallocate_framebuffer();
+}
 
-    destroy_framebuffer(&state.fb);
-    state.fb = create_framebuffer((int)backing.width, (int)backing.height);
-
-    [state.ns_view setNeedsDisplay:YES];
+// Fires when the window moves between displays with different scale factors
+// (e.g. retina internal ↔ 1× external) or the user changes display scaling.
+// Logical point size doesn't change, so windowDidResize: doesn't fire — but
+// the backing pixel size does, and our framebuffer needs to follow.
+- (void)windowDidChangeBackingProperties:(NSNotification *)notification {
+    (void)notification;
+    reallocate_framebuffer();
 }
 
 @end
@@ -335,6 +336,16 @@ static NSSize get_backing_size(NSWindow *window) {
     NSView *view = [window contentView];
     NSSize logical = [view bounds].size;
     return [view convertSizeToBacking:logical];
+}
+
+// Destroy + recreate rather than resize in place because the CGBitmapContext
+// is bound to the pixel buffer at creation time — there's no way to re-point
+// it at a differently-sized allocation.
+static void reallocate_framebuffer(void) {
+    NSSize backing = get_backing_size(state.ns_window);
+    destroy_framebuffer(&state.fb);
+    state.fb = create_framebuffer((int)backing.width, (int)backing.height);
+    [state.ns_view setNeedsDisplay:YES];
 }
 
 static NSApplication *create_application(void) {
