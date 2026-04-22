@@ -114,6 +114,19 @@ static const platform_key_t kc_to_key[256] = {
         return;
     state.pending.keys[key].half_transition_count++;
     state.pending.keys[key].ended_down = true;
+
+    /* Capture printable characters into the text input buffer */
+    NSString *chars = [event characters];
+    if (chars && [chars length] > 0) {
+        const char *cstr = [chars UTF8String];
+        for (const char *p = cstr; *p && state.pending.text_len < PLATFORM_TEXT_BUFFER - 1; p++) {
+            unsigned char c = (unsigned char)*p;
+            if (c >= 0x20 && c < 0x7F) {
+                state.pending.text[state.pending.text_len++] = (char)c;
+            }
+        }
+        state.pending.text[state.pending.text_len] = '\0';
+    }
 }
 
 // Record key-up transition.
@@ -155,19 +168,6 @@ static const platform_key_t kc_to_key[256] = {
     if (is_down != state.pending.keys[key].ended_down) {
         state.pending.keys[key].half_transition_count++;
         state.pending.keys[key].ended_down = is_down;
-    }
-
-    /* Capture printable characters into the text input buffer */
-    NSString *chars = [event characters];
-    if (chars && [chars length] > 0) {
-        const char *cstr = [chars UTF8String];
-        for (const char *p = cstr; *p && state.pending.text_len < PLATFORM_TEXT_BUFFER - 1; p++) {
-            unsigned char c = (unsigned char)*p;
-            if (c >= 0x20 && c < 0x7F) {
-                state.pending.text[state.pending.text_len++] = (char)c;
-            }
-        }
-        state.pending.text[state.pending.text_len] = '\0';
     }
 }
 
