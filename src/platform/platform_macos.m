@@ -1,5 +1,8 @@
 #include "platform.h"
 #import <Cocoa/Cocoa.h>
+#import <IOKit/graphics/IOGraphicsLib.h>
+#import <IOKit/IOKitLib.h>
+#include <string.h>
 
 /* --- Private types (needed by the public API signatures) --- */
 typedef struct {
@@ -334,6 +337,14 @@ platform_framebuffer_t *platform_get_framebuffer(void) {
     reallocate_framebuffer();
 }
 
+// Fires when the window crosses to a different display. Same-scale moves
+// don't fire backingProperties; reallocate defensively (idempotent if size
+// hasn't changed).
+- (void)windowDidChangeScreen:(NSNotification *)notification {
+    (void)notification;
+    reallocate_framebuffer();
+}
+
 @end
 
 /* --- Private helpers --- */
@@ -479,4 +490,228 @@ void platform_toggle_fullscreen(void) {
 
 bool platform_is_fullscreen(void) {
     return ([state.ns_window styleMask] & NSWindowStyleMaskFullScreen) != 0;
+}
+
+/* --- Display info --- */
+
+// Find the IODisplayConnect IOService matching a CGDirectDisplayID by
+// comparing vendor/product/serial. Returns 0 if no match. Caller must
+// IOObjectRelease() the result if non-zero.
+static io_service_t io_service_for_display(CGDirectDisplayID display) {
+    io_iterator_t iter;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault,
+                                     IOServiceMatching("IODisplayConnect"),
+                                     &iter) != kIOReturnSuccess) {
+        return 0;
+    }
+
+    uint32_t want_v = CGDisplayVendorNumber(display);
+    uint32_t want_p = CGDisplayModelNumber(display);
+    uint32_t want_s = CGDisplaySerialNumber(display);
+
+    io_service_t result = 0;
+    io_service_t serv;
+    while ((serv = IOIteratorNext(iter)) != 0) {
+        CFDictionaryRef info = IODisplayCreateInfoDictionary(serv, 0);
+        if (info) {
+            uint32_t v = 0, p = 0, s = 0;
+            CFNumberRef vn = CFDictionaryGetValue(info, CFSTR(kDisplayVendorID));
+            CFNumberRef pn = CFDictionaryGetValue(info, CFSTR(kDisplayProductID));
+            CFNumberRef sn = CFDictionaryGetValue(info, CFSTR(kDisplaySerialNumber));
+            if (vn) CFNumberGetValue(vn, kCFNumberSInt32Type, &v);
+            if (pn) CFNumberGetValue(pn, kCFNumberSInt32Type, &p);
+            if (sn) CFNumberGetValue(sn, kCFNumberSInt32Type, &s);
+            CFRelease(info);
+
+            if (v == want_v && p == want_p && s == want_s) {
+                result = serv;
+                break;
+            }
+        }
+        IOObjectRelease(serv);
+    }
+    IOObjectRelease(iter);
+    return result;
+}
+
+// Read raw EDID name from IODisplayConnect. The DisplayProductName key holds
+// a per-language NSDictionary; we pick user's preferred language, then "en",
+// then any. Empty out[] if no name is available (typical for built-in panels).
+static void fill_edid_name(io_service_t serv, char *out, size_t cap) {
+    out[0] = '\0';
+    if (!serv) return;
+
+    CFDictionaryRef info = IODisplayCreateInfoDictionary(serv, 0);
+    if (!info) return;
+
+    CFDictionaryRef names = CFDictionaryGetValue(info, CFSTR(kDisplayProductName));
+    if (!names || CFGetTypeID(names) != CFDictionaryGetTypeID() || CFDictionaryGetCount(names) == 0) {
+        CFRelease(info);
+        return;
+    }
+
+    CFStringRef name_str = NULL;
+    NSArray *langs = [NSLocale preferredLanguages];
+    if ([langs count] > 0) {
+        name_str = CFDictionaryGetValue(names, (__bridge CFStringRef)langs[0]);
+    }
+    if (!name_str) name_str = CFDictionaryGetValue(names, CFSTR("en"));
+    if (!name_str) {
+        CFIndex count = CFDictionaryGetCount(names);
+        if (count > 0) {
+            const void **values = (const void **)malloc(sizeof(void *) * (size_t)count);
+            CFDictionaryGetKeysAndValues(names, NULL, values);
+            name_str = (CFStringRef)values[0];
+            free(values);
+        }
+    }
+
+    if (name_str && CFGetTypeID(name_str) == CFStringGetTypeID()) {
+        CFStringGetCString(name_str, out, (CFIndex)cap, kCFStringEncodingUTF8);
+    }
+    CFRelease(info);
+}
+
+// IOFramebuffer (parent of IODisplayConnect) has the rotate-mask property.
+// Bit 0 is always 0° (identity); >1 means at least one other rotation works.
+static bool query_rotation_supported(io_service_t serv) {
+    if (!serv) return false;
+
+    io_service_t parent = 0;
+    if (IORegistryEntryGetParentEntry(serv, kIOServicePlane, &parent) != kIOReturnSuccess) {
+        return false;
+    }
+
+    bool supported = false;
+    CFNumberRef rot = (CFNumberRef)IORegistryEntryCreateCFProperty(
+        parent, CFSTR("rotate-mask"), kCFAllocatorDefault, 0);
+    if (rot && CFGetTypeID(rot) == CFNumberGetTypeID()) {
+        uint32_t mask = 0;
+        CFNumberGetValue(rot, kCFNumberSInt32Type, &mask);
+        supported = mask > 1;
+    }
+    if (rot) CFRelease(rot);
+    IOObjectRelease(parent);
+    return supported;
+}
+
+// Walk parent chain looking for a class name that identifies the connection.
+// Built-in is detected upfront via CGDisplayIsBuiltin and short-circuits here.
+static platform_connection_type_t detect_connection_type(io_service_t serv, bool builtin) {
+    if (builtin) return PLATFORM_CONNECTION_INTERNAL;
+    if (!serv)   return PLATFORM_CONNECTION_UNKNOWN;
+
+    io_service_t s = serv;
+    IOObjectRetain(s);
+    platform_connection_type_t result = PLATFORM_CONNECTION_UNKNOWN;
+    for (int i = 0; i < 8; i++) {
+        io_name_t class_name;
+        if (IOObjectGetClass(s, class_name) == kIOReturnSuccess) {
+            if      (strstr(class_name, "HDMI"))        { result = PLATFORM_CONNECTION_HDMI;        break; }
+            else if (strstr(class_name, "DisplayPort")) { result = PLATFORM_CONNECTION_DISPLAYPORT; break; }
+            else if (strstr(class_name, "Thunderbolt")) { result = PLATFORM_CONNECTION_THUNDERBOLT; break; }
+            else if (strstr(class_name, "AirPlay"))     { result = PLATFORM_CONNECTION_AIRPLAY;     break; }
+            else if (strstr(class_name, "VGA"))         { result = PLATFORM_CONNECTION_VGA;         break; }
+            else if (strstr(class_name, "DVI"))         { result = PLATFORM_CONNECTION_DVI;         break; }
+        }
+        io_service_t parent = 0;
+        if (IORegistryEntryGetParentEntry(s, kIOServicePlane, &parent) != kIOReturnSuccess) {
+            break;
+        }
+        IOObjectRelease(s);
+        s = parent;
+    }
+    IOObjectRelease(s);
+    return result;
+}
+
+static NSScreen *screen_for_display(CGDirectDisplayID display) {
+    for (NSScreen *s in [NSScreen screens]) {
+        NSNumber *num = [s deviceDescription][@"NSScreenNumber"];
+        if (num && (CGDirectDisplayID)[num unsignedIntValue] == display) {
+            return s;
+        }
+    }
+    return nil;
+}
+
+static void fill_display_info(CGDirectDisplayID id, platform_display_info_t *out) {
+    memset(out, 0, sizeof(*out));
+    out->id = id;
+
+    NSScreen *screen = screen_for_display(id);
+    if (screen) {
+        const char *cstr = [[screen localizedName] UTF8String];
+        if (cstr) strncpy(out->name, cstr, sizeof(out->name) - 1);
+
+        out->scale = (float)[screen backingScaleFactor];
+
+        NSRect frame = [screen frame];
+        out->bounds_x = (int)frame.origin.x;
+        out->bounds_y = (int)frame.origin.y;
+        out->bounds_w = (int)frame.size.width;
+        out->bounds_h = (int)frame.size.height;
+
+        NSRect work = [screen visibleFrame];
+        out->work_x = (int)work.origin.x;
+        out->work_y = (int)work.origin.y;
+        out->work_w = (int)work.size.width;
+        out->work_h = (int)work.size.height;
+
+        out->refresh_hz = (float)[screen maximumFramesPerSecond];
+    } else {
+        CGRect b = CGDisplayBounds(id);
+        out->bounds_x = (int)b.origin.x;
+        out->bounds_y = (int)b.origin.y;
+        out->bounds_w = (int)b.size.width;
+        out->bounds_h = (int)b.size.height;
+        out->scale    = 1.0f;
+    }
+
+    out->pixels_w   = (int)CGDisplayPixelsWide(id);
+    out->pixels_h   = (int)CGDisplayPixelsHigh(id);
+
+    CGSize mm = CGDisplayScreenSize(id);
+    out->size_mm_w  = (int)mm.width;
+    out->size_mm_h  = (int)mm.height;
+
+    out->builtin    = CGDisplayIsBuiltin(id) ? true : false;
+    out->is_main    = CGDisplayIsMain(id)    ? true : false;
+    out->is_online  = CGDisplayIsOnline(id)  ? true : false;
+    out->mirrors_id = (uint32_t)CGDisplayMirrorsDisplay(id);
+    out->rotation   = (int)CGDisplayRotation(id);
+
+    // Prefer mode's reported refresh if it's nonzero (more precise than
+    // NSScreen's int Hz). 0 from the mode means built-in / variable.
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(id);
+    if (mode) {
+        double hz = CGDisplayModeGetRefreshRate(mode);
+        if (hz > 0.0) out->refresh_hz = (float)hz;
+        CGDisplayModeRelease(mode);
+    }
+
+    io_service_t serv = io_service_for_display(id);
+    fill_edid_name(serv, out->name_original, sizeof(out->name_original));
+    out->rotation_supported = query_rotation_supported(serv);
+    out->connection_type    = detect_connection_type(serv, out->builtin);
+    if (serv) IOObjectRelease(serv);
+}
+
+int platform_get_displays(platform_display_info_t *out, int max) {
+    if (max <= 0) return 0;
+    CGDirectDisplayID ids[16];
+    uint32_t count = 0;
+    if (CGGetActiveDisplayList(16, ids, &count) != kCGErrorSuccess) return 0;
+    int n = (int)count < max ? (int)count : max;
+    for (int i = 0; i < n; i++) {
+        fill_display_info(ids[i], &out[i]);
+    }
+    return n;
+}
+
+uint32_t platform_get_window_display_id(void) {
+    NSScreen *screen = [state.ns_window screen];
+    if (!screen) screen = [NSScreen mainScreen];
+    NSNumber *num = [screen deviceDescription][@"NSScreenNumber"];
+    return num ? (uint32_t)[num unsignedIntValue] : 0;
 }
