@@ -95,7 +95,7 @@ static const platform_key_t kc_to_key[256] = {
 }
 
 - (BOOL)isFlipped {
-    return YES;  /* top-left origin to match framebuffer */
+    return YES; /* top-left origin to match framebuffer */
 }
 
 // Required for the view to receive keyboard events. Without this, AppKit
@@ -107,13 +107,13 @@ static const platform_key_t kc_to_key[256] = {
 // Record key-down transition. Repeats are filtered — we track physical
 // press/release, not the OS auto-repeat stream.
 - (void)keyDown:(NSEvent *)event {
-    if ([event isARepeat])
-        return;
     platform_key_t key = kc_to_key[[event keyCode] & 0xFF];
     if (key == PLATFORM_KEY_UNKNOWN)
         return;
     state.pending.keys[key].half_transition_count++;
-    state.pending.keys[key].ended_down = true;
+    if (![event isARepeat]) {
+        state.pending.keys[key].ended_down = true;
+    }
 
     /* Capture printable characters into the text input buffer */
     NSString *chars = [event characters];
@@ -177,10 +177,18 @@ static const platform_key_t kc_to_key[256] = {
     state.pending.mouse.y = (int)local.y;
 }
 
-- (void)mouseMoved:(NSEvent *)event       { [self updateMousePosition:event]; }
-- (void)mouseDragged:(NSEvent *)event     { [self updateMousePosition:event]; }
-- (void)rightMouseDragged:(NSEvent *)event { [self updateMousePosition:event]; }
-- (void)otherMouseDragged:(NSEvent *)event { [self updateMousePosition:event]; }
+- (void)mouseMoved:(NSEvent *)event {
+    [self updateMousePosition:event];
+}
+- (void)mouseDragged:(NSEvent *)event {
+    [self updateMousePosition:event];
+}
+- (void)rightMouseDragged:(NSEvent *)event {
+    [self updateMousePosition:event];
+}
+- (void)otherMouseDragged:(NSEvent *)event {
+    [self updateMousePosition:event];
+}
 
 - (void)mouseDown:(NSEvent *)event {
     [self updateMousePosition:event];
