@@ -125,6 +125,49 @@ static void render_checkerboard(platform_framebuffer_t *fb) {
     }
 }
 
+static const char *connection_type_str(platform_connection_type_t t) {
+    switch (t) {
+        case PLATFORM_CONNECTION_INTERNAL:    return "Internal";
+        case PLATFORM_CONNECTION_HDMI:        return "HDMI";
+        case PLATFORM_CONNECTION_DISPLAYPORT: return "DisplayPort";
+        case PLATFORM_CONNECTION_THUNDERBOLT: return "Thunderbolt";
+        case PLATFORM_CONNECTION_AIRPLAY:     return "AirPlay";
+        case PLATFORM_CONNECTION_VGA:         return "VGA";
+        case PLATFORM_CONNECTION_DVI:         return "DVI";
+        default:                              return "Unknown";
+    }
+}
+
+static void print_display(int idx, const platform_display_info_t *d, bool is_window) {
+    printf("  [%d]%s %-32s  id=%u scale=%.1f main=%d builtin=%d online=%d\n",
+           idx, is_window ? " *" : "  ", d->name,
+           d->id, (double)d->scale, d->is_main, d->builtin, d->is_online);
+    if (d->name_original[0])
+        printf("       original=\"%s\"\n", d->name_original);
+    printf("       bounds=(%d,%d)+(%dx%dpt)  work=(%d,%d)+(%dx%dpt)  pixels=%dx%d  size=%dx%dmm\n",
+           d->bounds_x, d->bounds_y, d->bounds_w, d->bounds_h,
+           d->work_x, d->work_y, d->work_w, d->work_h,
+           d->pixels_w, d->pixels_h, d->size_mm_w, d->size_mm_h);
+    printf("       refresh=%.2fHz  rotation=%d°%s  conn=%s%s\n",
+           (double)d->refresh_hz, d->rotation,
+           d->rotation_supported ? " (rotatable)" : "",
+           connection_type_str(d->connection_type),
+           d->mirrors_id ? "  (mirrors another)" : "");
+}
+
+static void print_displays_with_framebuffer(void) {
+    platform_framebuffer_t *fb = platform_get_framebuffer();
+    printf("framebuffer: %dx%d\n", fb->width, fb->height);
+
+    platform_display_info_t displays[8];
+    int n = platform_get_displays(displays, 8);
+    uint32_t my = platform_get_window_display_id();
+    printf("displays: %d\n", n);
+    for (int i = 0; i < n; i++) {
+        print_display(i, &displays[i], displays[i].id == my);
+    }
+}
+
 int main(void) {
     if (!platform_init(1280, 720, "libcg")) {
         fprintf(stderr, "Failed to initialize platform\n");
@@ -207,10 +250,7 @@ int main(void) {
                 bg_checkerboard = !bg_checkerboard;
                 printf("background: %s\n", bg_checkerboard ? "checkerboard" : "transparent");
             }
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_T)) {
-                platform_framebuffer_t *fbi = platform_get_framebuffer();
-                printf("framebuffer: %dx%d\n", fbi->width, fbi->height);
-            }
+            if (platform_is_key_pressed(&input, PLATFORM_KEY_T)) print_displays_with_framebuffer();
         }
 
         /* Mouse output is suppressed while typing a color */
