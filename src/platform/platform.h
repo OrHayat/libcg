@@ -266,13 +266,18 @@ typedef struct {
 } platform_frame_t;
 
 typedef struct {
-    /* Lifecycle */
+    /* Lifecycle. frame_cb is required; init_cb / event_cb / cleanup_cb may
+       be NULL. event_cb is declared for API stability but not yet invoked —
+       in this transitional design, frame_cb drives input via
+       platform_poll_events. event dispatch lands in PR 2.4. */
     void (*init_cb)   (void *user_data);
     void (*frame_cb)  (const platform_frame_t *f, void *user_data);
-    void (*event_cb)  (const platform_event_t *e, void *user_data);
+    void (*event_cb)  (const platform_event_t *e, void *user_data); /* WIP — not yet wired */
     void (*cleanup_cb)(void *user_data);
 
-    /* Window config */
+    /* Window config. transparent/resizable/high_dpi are not yet plumbed
+       through platform_run — platform_init currently hardcodes all three.
+       They'll be honored once a caller actually needs to opt out. */
     int         width;
     int         height;
     const char *title;
@@ -289,5 +294,10 @@ typedef struct {
    drives the desc callbacks, and returns when the window closes. The
    application's main() should return platform_run's result. */
 int platform_run(const platform_app_desc_t *desc);
+
+/* Game requests the run loop to exit. The platform_run loop notices on its
+   next iteration, runs cleanup_cb, and returns — even if the OS window is
+   still open. No-op outside platform_run. */
+void platform_request_quit(void);
 
 #endif /* PLATFORM_H */

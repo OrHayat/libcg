@@ -251,136 +251,133 @@ static void print_displays_with_framebuffer(void) {
     }
 }
 
+static void on_frame(const platform_frame_t *f, void *ud) {
+    (void)ud;
+
+    /* All loop-local state lives here as statics. PR 2.4 will clean these
+       into a proper game_state_t once event-based input lands. */
+    static bool print_mouse_coords = false;
+    static bool bg_checkerboard    = false;
+    static int  last_mx = -1, last_my = -1;
+    static pattern_t pattern = PATTERN_SOLID;
+    static bool color_input_mode = false;
+    static char color_input_buf[16] = {0};
+    static int  color_input_len = 0;
+    static platform_input_t input = {0};
+
+    platform_poll_events(&input);
+
+    /* Process text input — may toggle color_input_mode */
+    for (int i = 0; i < input.text_len; i++) {
+        char c = input.text[i];
+        if (!color_input_mode && c == '#') {
+            color_input_mode = true;
+            color_input_len  = 0;
+            color_input_buf[0] = '\0';
+            printf("color input mode (type hex digits, Enter to apply, Esc to cancel)\n");
+            printf("color input: #");
+            fflush(stdout);
+        } else if (color_input_mode && c != '#' && hex_digit(c) >= 0 && color_input_len < 8) {
+            color_input_buf[color_input_len++] = c;
+            color_input_buf[color_input_len]   = '\0';
+            printf("\r\x1b[Kcolor input: #%s", color_input_buf);
+            fflush(stdout);
+        }
+    }
+
+    if (color_input_mode) {
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_BACKSPACE) && color_input_len > 0) {
+            color_input_buf[--color_input_len] = '\0';
+            printf("\r\x1b[Kcolor input: #%s", color_input_buf);
+            fflush(stdout);
+        }
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_ENTER)) {
+            u32 parsed;
+            if (parse_hex_color(color_input_buf, color_input_len, &parsed)) {
+                s_custom_color = parsed;
+                pattern = PATTERN_CUSTOM_COLOR;
+                printf("\ncolor applied: #%s -> 0x%08X\n", color_input_buf, parsed);
+            } else {
+                printf("\r\x1b[K#%s is not valid format\n", color_input_buf);
+            }
+            color_input_mode = false;
+            color_input_len  = 0;
+            color_input_buf[0] = '\0';
+        }
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_ESCAPE)) {
+            printf("\ncolor input cancelled\n");
+            color_input_mode = false;
+            color_input_len  = 0;
+            color_input_buf[0] = '\0';
+        }
+    } else {
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_Q))
+            platform_request_quit();
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_M)) {
+            print_mouse_coords = !print_mouse_coords;
+            printf("mouse coord printing: %s\n", print_mouse_coords ? "ON" : "OFF");
+        }
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_F))
+            platform_toggle_fullscreen();
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_ESCAPE) && platform_is_fullscreen())
+            platform_toggle_fullscreen();
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_1)) pattern = PATTERN_SOLID;
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_2)) pattern = PATTERN_GRADIENT;
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_3)) pattern = PATTERN_CYCLE;
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_4)) pattern = PATTERN_NOISE;
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_B)) {
+            bg_checkerboard = !bg_checkerboard;
+            printf("background: %s\n", bg_checkerboard ? "checkerboard" : "transparent");
+        }
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_T)) print_displays_with_framebuffer();
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_L)) print_window_display_modes();
+    }
+
+    /* Mouse output is suppressed while typing a color */
+    if (!color_input_mode) {
+        if (print_mouse_coords && (input.mouse.x != last_mx || input.mouse.y != last_my)) {
+            printf("mouse: (%d, %d)\n", input.mouse.x, input.mouse.y);
+            last_mx = input.mouse.x;
+            last_my = input.mouse.y;
+        }
+        if (platform_is_mouse_pressed(&input, PLATFORM_MOUSE_LEFT))
+            printf("mouse left pressed at (%d, %d)\n", input.mouse.x, input.mouse.y);
+        if (platform_is_mouse_released(&input, PLATFORM_MOUSE_LEFT))
+            printf("mouse left released at (%d, %d)\n", input.mouse.x, input.mouse.y);
+        if (platform_is_mouse_pressed(&input, PLATFORM_MOUSE_RIGHT))
+            printf("mouse right pressed at (%d, %d)\n", input.mouse.x, input.mouse.y);
+        if (platform_is_mouse_released(&input, PLATFORM_MOUSE_RIGHT))
+            printf("mouse right released at (%d, %d)\n", input.mouse.x, input.mouse.y);
+        if (platform_is_mouse_pressed(&input, PLATFORM_MOUSE_MIDDLE))
+            printf("mouse middle pressed at (%d, %d)\n", input.mouse.x, input.mouse.y);
+        if (platform_is_mouse_released(&input, PLATFORM_MOUSE_MIDDLE))
+            printf("mouse middle released at (%d, %d)\n", input.mouse.x, input.mouse.y);
+        if (input.mouse.scroll_dx != 0.0f || input.mouse.scroll_dy != 0.0f)
+            printf("scroll: dx=%.1f dy=%.1f\n", (double)input.mouse.scroll_dx, (double)input.mouse.scroll_dy);
+    }
+
+    /* Background first — either checker or fully transparent.
+       Required so alpha-blended patterns (CUSTOM_COLOR) have a
+       correct base and don't pick up last frame's pixels. */
+    if (bg_checkerboard) {
+        render_checkerboard(f->fb);
+    } else {
+        framebuffer_clear(f->fb, 0x00000000);
+    }
+    switch (pattern) {
+        case PATTERN_SOLID:        render_solid(f->fb); break;
+        case PATTERN_GRADIENT:     render_gradient(f->fb); break;
+        case PATTERN_CYCLE:        render_cycle(f->fb, (double)f->frame_index * 0.05); break;
+        case PATTERN_NOISE:        render_noise(f->fb); break;
+        case PATTERN_CUSTOM_COLOR: render_custom_color(f->fb, s_custom_color); break;
+    }
+}
+
 int main(void) {
-    if (!platform_init(1280, 720, "libcg")) {
-        fprintf(stderr, "Failed to initialize platform\n");
-        return 1;
-    }
-
-    bool print_mouse_coords = false;
-    bool bg_checkerboard    = false;
-    int  last_mx = -1, last_my = -1;
-    pattern_t pattern = PATTERN_SOLID;
-    int  frame_count = 0;
-
-    bool color_input_mode = false;
-    char color_input_buf[16] = {0};
-    int  color_input_len = 0;
-
-    platform_input_t input = {0};
-    while (!input.quit_requested) {
-        platform_poll_events(&input);
-
-        /* Process text input — may toggle color_input_mode */
-        for (int i = 0; i < input.text_len; i++) {
-            char c = input.text[i];
-            if (!color_input_mode && c == '#') {
-                color_input_mode = true;
-                color_input_len  = 0;
-                color_input_buf[0] = '\0';
-                printf("color input mode (type hex digits, Enter to apply, Esc to cancel)\n");
-                printf("color input: #");
-                fflush(stdout);
-            } else if (color_input_mode && c != '#' && hex_digit(c) >= 0 && color_input_len < 8) {
-                color_input_buf[color_input_len++] = c;
-                color_input_buf[color_input_len]   = '\0';
-                printf("\r\x1b[Kcolor input: #%s", color_input_buf);
-                fflush(stdout);
-            }
-        }
-
-        if (color_input_mode) {
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_BACKSPACE) && color_input_len > 0) {
-                color_input_buf[--color_input_len] = '\0';
-                printf("\r\x1b[Kcolor input: #%s", color_input_buf);
-                fflush(stdout);
-            }
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_ENTER)) {
-                u32 parsed;
-                if (parse_hex_color(color_input_buf, color_input_len, &parsed)) {
-                    s_custom_color = parsed;
-                    pattern = PATTERN_CUSTOM_COLOR;
-                    printf("\ncolor applied: #%s -> 0x%08X\n", color_input_buf, parsed);
-                } else {
-                    printf("\r\x1b[K#%s is not valid format\n", color_input_buf);
-                }
-                color_input_mode = false;
-                color_input_len  = 0;
-                color_input_buf[0] = '\0';
-            }
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_ESCAPE)) {
-                printf("\ncolor input cancelled\n");
-                color_input_mode = false;
-                color_input_len  = 0;
-                color_input_buf[0] = '\0';
-            }
-        } else {
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_Q))
-                input.quit_requested = true;
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_M)) {
-                print_mouse_coords = !print_mouse_coords;
-                printf("mouse coord printing: %s\n", print_mouse_coords ? "ON" : "OFF");
-            }
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_F))
-                platform_toggle_fullscreen();
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_ESCAPE) && platform_is_fullscreen())
-                platform_toggle_fullscreen();
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_1)) pattern = PATTERN_SOLID;
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_2)) pattern = PATTERN_GRADIENT;
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_3)) pattern = PATTERN_CYCLE;
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_4)) pattern = PATTERN_NOISE;
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_B)) {
-                bg_checkerboard = !bg_checkerboard;
-                printf("background: %s\n", bg_checkerboard ? "checkerboard" : "transparent");
-            }
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_T)) print_displays_with_framebuffer();
-            if (platform_is_key_pressed(&input, PLATFORM_KEY_L)) print_window_display_modes();
-        }
-
-        /* Mouse output is suppressed while typing a color */
-        if (!color_input_mode) {
-            if (print_mouse_coords && (input.mouse.x != last_mx || input.mouse.y != last_my)) {
-                printf("mouse: (%d, %d)\n", input.mouse.x, input.mouse.y);
-                last_mx = input.mouse.x;
-                last_my = input.mouse.y;
-            }
-            if (platform_is_mouse_pressed(&input, PLATFORM_MOUSE_LEFT))
-                printf("mouse left pressed at (%d, %d)\n", input.mouse.x, input.mouse.y);
-            if (platform_is_mouse_released(&input, PLATFORM_MOUSE_LEFT))
-                printf("mouse left released at (%d, %d)\n", input.mouse.x, input.mouse.y);
-            if (platform_is_mouse_pressed(&input, PLATFORM_MOUSE_RIGHT))
-                printf("mouse right pressed at (%d, %d)\n", input.mouse.x, input.mouse.y);
-            if (platform_is_mouse_released(&input, PLATFORM_MOUSE_RIGHT))
-                printf("mouse right released at (%d, %d)\n", input.mouse.x, input.mouse.y);
-            if (platform_is_mouse_pressed(&input, PLATFORM_MOUSE_MIDDLE))
-                printf("mouse middle pressed at (%d, %d)\n", input.mouse.x, input.mouse.y);
-            if (platform_is_mouse_released(&input, PLATFORM_MOUSE_MIDDLE))
-                printf("mouse middle released at (%d, %d)\n", input.mouse.x, input.mouse.y);
-            if (input.mouse.scroll_dx != 0.0f || input.mouse.scroll_dy != 0.0f)
-                printf("scroll: dx=%.1f dy=%.1f\n", (double)input.mouse.scroll_dx, (double)input.mouse.scroll_dy);
-        }
-
-        platform_framebuffer_t *fb = platform_get_framebuffer();
-        /* Background first — either checker or fully transparent.
-           Required so alpha-blended patterns (CUSTOM_COLOR) have a
-           correct base and don't pick up last frame's pixels. */
-        if (bg_checkerboard) {
-            render_checkerboard(fb);
-        } else {
-            framebuffer_clear(fb, 0x00000000);
-        }
-        switch (pattern) {
-            case PATTERN_SOLID:        render_solid(fb); break;
-            case PATTERN_GRADIENT:     render_gradient(fb); break;
-            case PATTERN_CYCLE:        render_cycle(fb, frame_count * 0.05); break;
-            case PATTERN_NOISE:        render_noise(fb); break;
-            case PATTERN_CUSTOM_COLOR: render_custom_color(fb, s_custom_color); break;
-        }
-
-        frame_count++;
-        platform_present();
-    }
-
-    platform_shutdown();
-    return 0;
+    return platform_run(&(platform_app_desc_t){
+        .width    = 1280,
+        .height   = 720,
+        .title    = "libcg",
+        .frame_cb = on_frame,
+    });
 }
