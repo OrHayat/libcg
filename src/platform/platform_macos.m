@@ -81,21 +81,26 @@ static const platform_key_t kc_to_key[256] = {
 };
 // clang-format on
 
-/* --- LibcgView (custom NSView that blits the framebuffer) --- */
+/* --- LibcgView (custom NSView; presentation is via layer.contents) --- */
+
+/* Forward decls for the rendering helpers used by drawRect: below.
+   reallocate_framebuffer/etc. are declared in the helpers block further down. */
+static void commit_to_layer(void);   /* present whatever is in fb (no frame_cb) */
+static void present_frame(void);     /* run frame_cb, then commit_to_layer */
 
 @interface LibcgView : NSView
 @end
 
 @implementation LibcgView
+/* Rendering doesn't go through drawRect: in this backend. Frames are
+   pushed by present_frame() / commit_to_layer() via direct CALayer.contents
+   assignment — the only path that updates pixels mid-drag during a live
+   window resize on modern macOS. drawRect: is kept non-empty so any
+   AppKit-driven repaint (e.g. expose, occlusion) still shows the latest
+   framebuffer instead of an empty layer. */
 - (void)drawRect:(NSRect)dirtyRect {
     (void)dirtyRect;
-    if (!state.fb.context)
-        return;
-
-    CGContextRef cg = [[NSGraphicsContext currentContext] CGContext];
-    CGImageRef image = CGBitmapContextCreateImage(state.fb.context);
-    CGContextDrawImage(cg, [self bounds], image);
-    CGImageRelease(image);
+    commit_to_layer();
 }
 
 - (BOOL)isFlipped {
@@ -263,6 +268,13 @@ bool platform_init(int width, int height, const char *title) {
     [state.ns_window makeFirstResponder:state.ns_view];
     [state.ns_window setAcceptsMouseMovedEvents:YES];
 
+    /* Layer-backed view with explicit content-placement. Presentation works
+       by assigning CGImages to view.layer.contents — the only path that
+       updates pixels mid-drag during a live resize. The placement controls
+       how the CALayer scales contents when the view bounds change. */
+    [state.ns_view setWantsLayer:YES];
+    state.ns_view.layerContentsPlacement = NSViewLayerContentsPlacementScaleProportionallyToFit;
+
     // On retina/HiDPI displays the backing store is larger than the logical
     // window size (e.g. 1280×720 logical → 2560×1440 backing at 2× scale).
     // Allocate the framebuffer at backing resolution so we render at native
@@ -302,10 +314,11 @@ void platform_poll_events(platform_input_t *input) {
 }
 
 void platform_present(void) {
-    // [view display] paints right now. The alternative, [view setNeedsDisplay:YES],
-    // only asks AppKit to paint "later" — and "later" is triggered by runloop code
-    // our manual event pump doesn't run, so it would never actually happen.
-    [state.ns_view display];
+    /* Direct CALayer.contents commit — bypasses AppKit's drawRect coalescing
+       which silently drops paints during tracking-mode runloops (live resize).
+       Caller's pixels go on screen the same way the new callback API path
+       does (see commit_to_layer + present_frame). */
+    commit_to_layer();
 }
 
 platform_framebuffer_t *platform_get_framebuffer(void) {
@@ -327,6 +340,7 @@ platform_framebuffer_t *platform_get_framebuffer(void) {
 - (void)windowDidResize:(NSNotification *)notification {
     (void)notification;
     reallocate_framebuffer();
+    present_frame();   /* render + commit to layer.contents — works in tracking mode */
 }
 
 // Fires when the window moves between displays with different scale factors
@@ -336,6 +350,8 @@ platform_framebuffer_t *platform_get_framebuffer(void) {
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification {
     (void)notification;
     reallocate_framebuffer();
+    present_frame();   /* fill the freshly-calloc'd transparent buffer before
+                          AppKit composites it — same fix as windowDidResize. */
 }
 
 // Fires when the window crosses to a different display. Same-scale moves
@@ -344,6 +360,7 @@ platform_framebuffer_t *platform_get_framebuffer(void) {
 - (void)windowDidChangeScreen:(NSNotification *)notification {
     (void)notification;
     reallocate_framebuffer();
+    present_frame();
 }
 
 @end
@@ -759,8 +776,123 @@ uint32_t platform_get_window_display_id(void) {
 
 /* --- New callback API --- */
 
+/* Static state for the active platform_run invocation.
+   CFAbsoluteTime (plain double) instead of NSDate avoids autorelease
+   accumulation in the hot present_frame loop. */
+static const platform_app_desc_t *_libcg_active_desc     = NULL;
+static CFAbsoluteTime             _libcg_run_t0          = 0.0;
+static CFAbsoluteTime             _libcg_run_t_prev      = 0.0;
+static uint64_t                   _libcg_run_frame_index = 0;
+static bool                       _libcg_in_present      = false;
+
 void platform_request_quit(void) {
     state.running = false;
+}
+
+/* CGDataProvider release callback — frees the per-frame snapshot buffer
+   when the CGImage built from it is finally dropped (typically when the
+   next frame replaces layer.contents). */
+static void release_snapshot_buffer(void *info, const void *data, size_t size) {
+    (void)info;
+    (void)size;
+    free((void *)data);
+}
+
+/* Snapshot fb into a fresh buffer and assign it to the view's CALayer.contents.
+   Used by drawRect: (so AppKit-driven paints / [view display] still work),
+   by platform_present (legacy polled API), and as the tail of present_frame.
+   No frame_cb invocation here — caller has already produced fb pixels.
+
+   Why an explicit memcpy rather than CGBitmapContextCreateImage:
+   CGBitmapContextCreateImage's documented copy-on-write only kicks in for
+   modifications made through CGContext drawing APIs. We mutate fb->pixels
+   via raw pointer writes (frame_cb / framebuffer_clear / etc.), which CG
+   can't observe — so the CGImage it returns shares our buffer indefinitely.
+   CALayer retains the image and the compositor reads it on its own cycle;
+   if reallocate_framebuffer() later free()s fb->pixels, the layer is left
+   pointing at freed memory until the next commit. The snapshot+provider
+   pattern below gives the CGImage its own buffer with a release callback,
+   so the image stays valid past any reallocation. */
+static void commit_to_layer(void) {
+    if (!state.fb.context || !state.ns_view) return;
+
+    int    w         = state.fb.pub.width;
+    int    h         = state.fb.pub.height;
+    size_t row_bytes = (size_t)w * sizeof(uint32_t);
+    size_t total     = row_bytes * (size_t)h;
+
+    void *snapshot = malloc(total);
+    if (!snapshot) return;
+    memcpy(snapshot, state.fb.pub.pixels, total);
+
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGDataProviderRef provider = CGDataProviderCreateWithData(
+        NULL, snapshot, total, release_snapshot_buffer);
+    CGImageRef img = CGImageCreate(
+        (size_t)w, (size_t)h,
+        8,                                 /* bits per component */
+        32,                                /* bits per pixel */
+        row_bytes,
+        cs,
+        kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Little,
+        provider,
+        NULL,                              /* no decode array */
+        false,                             /* no interpolation */
+        kCGRenderingIntentDefault);
+
+    /* (__bridge id) is ARC's required cast for CF→Obj-C pointer conversion.
+       Plain `__bridge` means "treat as id, no ownership transfer" — we keep
+       our +1 ref and CGImageRelease below; CALayer retains internally. */
+    state.ns_view.layer.contents = (__bridge id)img;
+
+    CGImageRelease(img);
+    CGDataProviderRelease(provider);
+    CGColorSpaceRelease(cs);
+}
+
+/* Run game frame_cb (which fills fb), then commit. Bypasses AppKit's
+   drawRect coalescing — Core Animation's main-thread transactions commit
+   during live-resize tracking-mode runloops. Pattern: Bendixson HMH-mac. */
+static void present_frame(void) {
+    /* No active platform_run — either the caller is on the legacy polled
+       API path (platform_init + platform_poll_events + platform_present in
+       their own loop, no frame_cb to invoke) or platform_run already
+       cleared _libcg_active_desc in its cleanup tail and AppKit fired a
+       late delegate notification during [window close]. Nothing to drive,
+       bail. */
+    if (!_libcg_active_desc) return;
+
+    /* Re-entry guard. AppKit can fire windowDidResize: / backingProperties /
+       screen synchronously from inside frame_cb's platform_poll_events
+       (pump_events → [NSApp sendEvent:] → delegate). Those delegates call
+       present_frame() directly, which would otherwise recurse: corrupt
+       _libcg_run_t_prev/_libcg_run_frame_index, double-invoke frame_cb, and
+       (worst case) UAF if frame_cb cached fb->pixels across the pump and
+       reallocate_framebuffer freed them. Dropping the recursive present is
+       safe — the next AppKit-driven resize tick (or run-loop iteration)
+       will pick up the latest size. */
+    if (_libcg_in_present) return;
+    _libcg_in_present = true;
+
+    if (_libcg_active_desc->frame_cb) {
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        platform_frame_t frame = {
+            .fb          = &state.fb.pub,
+            .dt          = now - _libcg_run_t_prev,
+            .time        = now - _libcg_run_t0,
+            .frame_index = _libcg_run_frame_index++,
+        };
+        _libcg_active_desc->frame_cb(&frame, _libcg_active_desc->user_data);
+        _libcg_run_t_prev = now;
+    }
+
+    /* frame_cb may flip state.running (platform_request_quit, or
+       windowWillClose during platform_poll_events). Skip the commit so we
+       don't push pixels to a window that's on its way out. The run-loop's
+       while-condition will exit on the next iteration. */
+    if (state.running) commit_to_layer();
+
+    _libcg_in_present = false;
 }
 
 int platform_run(const platform_app_desc_t *desc) {
@@ -789,12 +921,10 @@ int platform_run(const platform_app_desc_t *desc) {
 
     if (desc->init_cb) desc->init_cb(desc->user_data);
 
-    /* CFAbsoluteTime is a plain double — no autorelease, no allocation per
-       frame. Avoids the unbounded autoreleased-NSDate growth we'd get
-       running this hot loop without a per-iteration @autoreleasepool. */
-    CFAbsoluteTime t0     = CFAbsoluteTimeGetCurrent();
-    CFAbsoluteTime t_prev = t0;
-    uint64_t       frame_index = 0;
+    _libcg_active_desc     = desc;
+    _libcg_run_t0          = CFAbsoluteTimeGetCurrent();
+    _libcg_run_t_prev      = _libcg_run_t0;
+    _libcg_run_frame_index = 0;
 
     /* TRANSITIONAL: this loop doesn't pump OS events itself — the game's
        frame_cb is expected to call platform_poll_events() (legacy polled
@@ -802,30 +932,24 @@ int platform_run(const platform_app_desc_t *desc) {
        double-pump because platform_poll_events resets per-frame transition
        counts at its start, dropping any events the duplicate pump just
        delivered. Real fix lands in PR 2.4 (event_cb wiring) which
-       restructures the pump path. The @autoreleasepool guards against any
-       autoreleased Obj-C objects frame_cb / present create accumulating. */
+       restructures the pump path.
+
+       The @autoreleasepool guards against autoreleased Obj-C objects
+       frame_cb / present_frame might create (e.g. NSDate instances inside
+       AppKit during display) accumulating across frames. */
     while (state.running) {
         @autoreleasepool {
-            CFAbsoluteTime t_now = CFAbsoluteTimeGetCurrent();
-            platform_frame_t frame = {
-                .fb          = &state.fb.pub,
-                .dt          = t_now - t_prev,
-                .time        = t_now - t0,
-                .frame_index = frame_index++,
-            };
-
-            desc->frame_cb(&frame, desc->user_data);
-            /* frame_cb may flip state.running via platform_request_quit, or
-               windowWillClose may have fired during platform_poll_events.
-               Skip the present in either case so we don't blit to a window
-               that's already on its way out. */
-            if (!state.running) break;
-            platform_present();
-            t_prev = t_now;
+            present_frame();
         }
     }
 
     if (desc->cleanup_cb) desc->cleanup_cb(desc->user_data);
+
+    _libcg_active_desc     = NULL;
+    _libcg_run_t0          = 0.0;
+    _libcg_run_t_prev      = 0.0;
+    _libcg_run_frame_index = 0;
+
     platform_shutdown();
     return 0;
 }
