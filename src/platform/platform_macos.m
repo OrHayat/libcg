@@ -701,6 +701,46 @@ int platform_get_displays(platform_display_info_t *out, int max) {
     return n;
 }
 
+int platform_get_display_modes(uint32_t display_id, platform_video_mode_t *out, int max) {
+    if (max <= 0) return 0;
+    CFArrayRef modes = CGDisplayCopyAllDisplayModes((CGDirectDisplayID)display_id, NULL);
+    if (!modes) return 0;
+
+    CGDisplayModeRef cur = CGDisplayCopyDisplayMode((CGDirectDisplayID)display_id);
+    int32_t cur_id = cur ? (int32_t)CGDisplayModeGetIODisplayModeID(cur) : -1;
+
+    CFIndex count = CFArrayGetCount(modes);
+    int n = (int)count < max ? (int)count : max;
+    bool found_current = false;
+    for (int i = 0; i < n; i++) {
+        CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+        out[i].width      = (int)CGDisplayModeGetWidth(m);
+        out[i].height     = (int)CGDisplayModeGetHeight(m);
+        out[i].pixels_w   = (int)CGDisplayModeGetPixelWidth(m);
+        out[i].pixels_h   = (int)CGDisplayModeGetPixelHeight(m);
+        out[i].refresh_hz = (float)CGDisplayModeGetRefreshRate(m);
+        out[i].is_current = ((int32_t)CGDisplayModeGetIODisplayModeID(m) == cur_id);
+        if (out[i].is_current) found_current = true;
+    }
+
+    /* CGDisplayCopyAllDisplayModes(NULL) hides scaled HiDPI modes. If the
+       user is on one of those, the current mode is missing from the array —
+       append it so callers always see a row marked is_current. */
+    if (cur && !found_current && n < max) {
+        out[n].width      = (int)CGDisplayModeGetWidth(cur);
+        out[n].height     = (int)CGDisplayModeGetHeight(cur);
+        out[n].pixels_w   = (int)CGDisplayModeGetPixelWidth(cur);
+        out[n].pixels_h   = (int)CGDisplayModeGetPixelHeight(cur);
+        out[n].refresh_hz = (float)CGDisplayModeGetRefreshRate(cur);
+        out[n].is_current = true;
+        n++;
+    }
+
+    if (cur) CGDisplayModeRelease(cur);
+    CFRelease(modes);
+    return n;
+}
+
 uint32_t platform_get_window_display_id(void) {
     NSScreen *screen = [state.ns_window screen];
     if (!screen) screen = [NSScreen mainScreen];

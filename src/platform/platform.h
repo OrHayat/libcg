@@ -167,6 +167,16 @@ typedef struct {
 /* Returns number of displays; fills up to `max` entries in out[] */
 int platform_get_displays(platform_display_info_t *out, int max);
 
+typedef struct {
+    int   width, height;         /* logical points */
+    int   pixels_w, pixels_h;    /* physical pixels */
+    float refresh_hz;
+    bool  is_current;            /* mode currently active for this display */
+} platform_video_mode_t;
+
+/* Returns number of modes for the given display; fills up to `max` entries */
+int platform_get_display_modes(uint32_t display_id, platform_video_mode_t *out, int max);
+
 /* CGDirectDisplayID of the display the window is currently on; match against
    platform_display_info_t.id from platform_get_displays. */
 uint32_t platform_get_window_display_id(void);
