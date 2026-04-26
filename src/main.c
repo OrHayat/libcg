@@ -4,6 +4,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 typedef enum {
     PATTERN_SOLID = 0,
@@ -122,6 +123,70 @@ static void render_checkerboard(platform_framebuffer_t *fb) {
             bool light = (((x / cell) + (y / cell)) & 1) == 0;
             fb->pixels[y * fb->width + x] = light ? RGB(220, 220, 220) : RGB(160, 160, 160);
         }
+    }
+}
+
+/* Paint canvas — fixed-size pixel buffer that survives window resizes.
+   Window is just a viewport onto it; resize never touches these pixels. */
+static u32 *paint_canvas   = NULL;
+static int  paint_canvas_w = 0;
+static int  paint_canvas_h = 0;
+
+/* Letterbox the canvas inside the framebuffer (Photoshop / MS Paint model).
+   Window > canvas → gray bars; window < canvas → canvas pixels are clipped
+   from view but remain in memory. No interpolation, ever. */
+static void render_paint_mode(platform_framebuffer_t *fb) {
+    framebuffer_clear(fb, RGB(48, 48, 48));
+    if (!paint_canvas) return;
+
+    int off_x = (fb->width  - paint_canvas_w) / 2;
+    int off_y = (fb->height - paint_canvas_h) / 2;
+
+    int dst_x0 = off_x < 0 ? 0 : off_x;
+    int dst_y0 = off_y < 0 ? 0 : off_y;
+    int dst_x1 = off_x + paint_canvas_w;
+    int dst_y1 = off_y + paint_canvas_h;
+    if (dst_x1 > fb->width)  dst_x1 = fb->width;
+    if (dst_y1 > fb->height) dst_y1 = fb->height;
+    if (dst_x0 >= dst_x1 || dst_y0 >= dst_y1) return;
+
+    int src_x = dst_x0 - off_x;
+    size_t row_bytes = (size_t)(dst_x1 - dst_x0) * sizeof(u32);
+    for (int y = dst_y0; y < dst_y1; y++) {
+        memcpy(&fb->pixels[y * fb->width + dst_x0],
+               &paint_canvas[(y - off_y) * paint_canvas_w + src_x],
+               row_bytes);
+    }
+
+    /* 1px black border around the canvas. Horizontal strips run from the
+       LEFT outer column (off_x - 1) through the RIGHT outer column
+       (off_x + paint_canvas_w) so the corners get covered — without that,
+       the four corner pixels stay gray and the border looks chipped. */
+    int top   = off_y - 1;
+    int bot   = off_y + paint_canvas_h;
+    int left  = off_x - 1;
+    int right = off_x + paint_canvas_w;
+
+    int hx0 = left  < 0           ? 0           : left;
+    int hx1 = right >= fb->width  ? fb->width-1 : right;   /* inclusive */
+    int vy0 = top   < 0           ? 0           : top;
+    int vy1 = bot   >= fb->height ? fb->height-1: bot;     /* inclusive */
+
+    if (top >= 0 && top < fb->height) {
+        for (int x = hx0; x <= hx1; x++)
+            fb->pixels[top * fb->width + x] = RGB(0, 0, 0);
+    }
+    if (bot >= 0 && bot < fb->height) {
+        for (int x = hx0; x <= hx1; x++)
+            fb->pixels[bot * fb->width + x] = RGB(0, 0, 0);
+    }
+    if (left >= 0 && left < fb->width) {
+        for (int y = vy0; y <= vy1; y++)
+            fb->pixels[y * fb->width + left] = RGB(0, 0, 0);
+    }
+    if (right >= 0 && right < fb->width) {
+        for (int y = vy0; y <= vy1; y++)
+            fb->pixels[y * fb->width + right] = RGB(0, 0, 0);
     }
 }
 
@@ -251,6 +316,31 @@ static void print_displays_with_framebuffer(void) {
     }
 }
 
+static void on_init(void *ud) {
+    (void)ud;
+    /* Allocate paint canvas at startup framebuffer size (retina-aware).
+       Survives all window resizes; window is just a viewport onto it. */
+    platform_framebuffer_t *fb0 = platform_get_framebuffer();
+    paint_canvas_w = fb0->width;
+    paint_canvas_h = fb0->height;
+
+    /* Compute pixel count once in size_t — keeps the malloc size and the
+       fill-loop bound consistent. int*int overflow would silently wrap and
+       under-fill or under-allocate; size_t is wide enough for any plausible
+       canvas. */
+    size_t pixel_count = (size_t)paint_canvas_w * (size_t)paint_canvas_h;
+    paint_canvas = malloc(pixel_count * sizeof(u32));
+    if (paint_canvas) {
+        for (size_t i = 0; i < pixel_count; i++) paint_canvas[i] = 0xFFFFFFFFu;
+    }
+}
+
+static void on_cleanup(void *ud) {
+    (void)ud;
+    free(paint_canvas);
+    paint_canvas = NULL;
+}
+
 static void on_frame(const platform_frame_t *f, void *ud) {
     (void)ud;
 
@@ -258,6 +348,7 @@ static void on_frame(const platform_frame_t *f, void *ud) {
        into a proper game_state_t once event-based input lands. */
     static bool print_mouse_coords = false;
     static bool bg_checkerboard    = false;
+    static bool paint_mode         = false;
     static int  last_mx = -1, last_my = -1;
     static pattern_t pattern = PATTERN_SOLID;
     static bool color_input_mode = false;
@@ -331,6 +422,10 @@ static void on_frame(const platform_frame_t *f, void *ud) {
         }
         if (platform_is_key_pressed(&input, PLATFORM_KEY_T)) print_displays_with_framebuffer();
         if (platform_is_key_pressed(&input, PLATFORM_KEY_L)) print_window_display_modes();
+        if (platform_is_key_pressed(&input, PLATFORM_KEY_P)) {
+            paint_mode = !paint_mode;
+            printf("mode: %s\n", paint_mode ? "paint" : "pattern");
+        }
     }
 
     /* Mouse output is suppressed while typing a color */
@@ -356,28 +451,34 @@ static void on_frame(const platform_frame_t *f, void *ud) {
             printf("scroll: dx=%.1f dy=%.1f\n", (double)input.mouse.scroll_dx, (double)input.mouse.scroll_dy);
     }
 
-    /* Background first — either checker or fully transparent.
-       Required so alpha-blended patterns (CUSTOM_COLOR) have a
-       correct base and don't pick up last frame's pixels. */
-    if (bg_checkerboard) {
-        render_checkerboard(f->fb);
+    if (paint_mode) {
+        render_paint_mode(f->fb);
     } else {
-        framebuffer_clear(f->fb, 0x00000000);
-    }
-    switch (pattern) {
-        case PATTERN_SOLID:        render_solid(f->fb); break;
-        case PATTERN_GRADIENT:     render_gradient(f->fb); break;
-        case PATTERN_CYCLE:        render_cycle(f->fb, (double)f->frame_index * 0.05); break;
-        case PATTERN_NOISE:        render_noise(f->fb); break;
-        case PATTERN_CUSTOM_COLOR: render_custom_color(f->fb, s_custom_color); break;
+        /* Background first — either checker or fully transparent.
+           Required so alpha-blended patterns (CUSTOM_COLOR) have a
+           correct base and don't pick up last frame's pixels. */
+        if (bg_checkerboard) {
+            render_checkerboard(f->fb);
+        } else {
+            framebuffer_clear(f->fb, 0x00000000);
+        }
+        switch (pattern) {
+            case PATTERN_SOLID:        render_solid(f->fb); break;
+            case PATTERN_GRADIENT:     render_gradient(f->fb); break;
+            case PATTERN_CYCLE:        render_cycle(f->fb, (double)f->frame_index * 0.05); break;
+            case PATTERN_NOISE:        render_noise(f->fb); break;
+            case PATTERN_CUSTOM_COLOR: render_custom_color(f->fb, s_custom_color); break;
+        }
     }
 }
 
 int main(void) {
     return platform_run(&(platform_app_desc_t){
-        .width    = 1280,
-        .height   = 720,
-        .title    = "libcg",
-        .frame_cb = on_frame,
+        .width      = 1280,
+        .height     = 720,
+        .title      = "libcg",
+        .init_cb    = on_init,
+        .frame_cb   = on_frame,
+        .cleanup_cb = on_cleanup,
     });
 }
