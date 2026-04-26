@@ -181,4 +181,113 @@ int platform_get_display_modes(uint32_t display_id, platform_video_mode_t *out, 
    platform_display_info_t.id from platform_get_displays. */
 uint32_t platform_get_window_display_id(void);
 
+/* ============================================================
+   New callback-based API (Sokol/SDL3 style — work in progress)
+
+   Game declares an app desc with callbacks and calls platform_run().
+   Platform owns the run loop, event dispatch, and rendering trigger.
+   Replaces the old polled API in subsequent refactor PRs (#17 fix).
+   ============================================================ */
+
+typedef enum {
+    PLATFORM_EV_NONE = 0,
+    PLATFORM_EV_KEY_DOWN,
+    PLATFORM_EV_KEY_UP,
+    PLATFORM_EV_TEXT_INPUT,        /* one printable codepoint per event */
+    PLATFORM_EV_MOUSE_DOWN,
+    PLATFORM_EV_MOUSE_UP,
+    PLATFORM_EV_MOUSE_MOVE,
+    PLATFORM_EV_SCROLL,
+    PLATFORM_EV_RESIZE,            /* framebuffer dimensions changed */
+    PLATFORM_EV_FOCUS,             /* no payload */
+    PLATFORM_EV_UNFOCUS,           /* no payload */
+    PLATFORM_EV_QUIT_REQUESTED,    /* no payload */
+    PLATFORM_EV_COUNT
+} platform_event_kind_t;
+
+/* Per-arm event types — referenced by name from the union in
+   platform_event_t below. Extracted as named typedefs (rather than
+   anonymous structs) so callers can pass single arms to helper functions
+   and so future per-event callbacks can take them by type.
+
+   Payload contract: callers MUST only read the union member matching
+   event.kind. For PLATFORM_EV_FOCUS / UNFOCUS / QUIT_REQUESTED / NONE,
+   the union contents are unspecified — there is no payload arm to read.
+   Multi-character paste-style input is delivered as multiple events,
+   one PLATFORM_EV_TEXT_INPUT per codepoint. */
+
+typedef struct {
+    platform_key_t key;
+    bool           repeat;
+} platform_key_event_t;
+
+typedef struct {
+    char ch[8];                      /* one UTF-8 codepoint (1-4 bytes) + null terminator */
+} platform_text_event_t;
+
+typedef struct {
+    platform_mouse_button_t btn;
+    int                     x, y;
+} platform_mouse_event_t;
+
+typedef struct {
+    int x, y;                        /* current cursor position */
+    int dx, dy;                      /* delta since last move */
+} platform_mouse_move_event_t;
+
+typedef struct {
+    float dx, dy;
+} platform_scroll_event_t;
+
+typedef struct {
+    int w, h;                        /* logical points */
+    int fb_w, fb_h;                  /* physical pixels (= w/h × backing scale) */
+} platform_resize_event_t;
+
+typedef struct {
+    platform_event_kind_t kind;
+    uint64_t              frame_index; /* same numbering as platform_frame_t.frame_index */
+
+    union {                            /* anonymous — access as e->key.key */
+        platform_key_event_t        key;
+        platform_text_event_t       text;
+        platform_mouse_event_t      mouse;
+        platform_mouse_move_event_t move;
+        platform_scroll_event_t     scroll;
+        platform_resize_event_t     resize;
+    };
+} platform_event_t;
+
+typedef struct {
+    platform_framebuffer_t *fb;        /* writable backing buffer */
+    double                  dt;        /* seconds since last frame */
+    double                  time;      /* seconds since app start */
+    uint64_t                frame_index;
+} platform_frame_t;
+
+typedef struct {
+    /* Lifecycle */
+    void (*init_cb)   (void *user_data);
+    void (*frame_cb)  (const platform_frame_t *f, void *user_data);
+    void (*event_cb)  (const platform_event_t *e, void *user_data);
+    void (*cleanup_cb)(void *user_data);
+
+    /* Window config */
+    int         width;
+    int         height;
+    const char *title;
+    bool        transparent;       /* setOpaque:NO + clearColor */
+    bool        resizable;
+    bool        high_dpi;
+
+    /* Opaque pointer passed back to all callbacks */
+    void       *user_data;
+} platform_app_desc_t;
+
+/* The application provides main() and calls platform_run(desc) with its
+   callbacks and window configuration. platform_run owns the event loop,
+   drives the desc callbacks, and returns when the window closes. The
+   application's main() should return platform_run's result. */
+int platform_run(const platform_app_desc_t *desc);
+
 #endif /* PLATFORM_H */
