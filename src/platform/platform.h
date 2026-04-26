@@ -115,4 +115,70 @@ platform_framebuffer_t *platform_get_framebuffer(void);
 void platform_toggle_fullscreen(void);
 bool platform_is_fullscreen(void);
 
+/* Display info */
+
+typedef enum {
+    PLATFORM_CONNECTION_UNKNOWN = 0,
+    PLATFORM_CONNECTION_INTERNAL,
+    PLATFORM_CONNECTION_HDMI,
+    PLATFORM_CONNECTION_DISPLAYPORT,
+    PLATFORM_CONNECTION_THUNDERBOLT,
+    PLATFORM_CONNECTION_VGA,
+    PLATFORM_CONNECTION_DVI,
+    PLATFORM_CONNECTION_AIRPLAY,
+} platform_connection_type_t;
+
+typedef struct {
+    char     name[64];           /* localizedName — user-rename if set, else EDID, else "Built-in Retina Display" */
+    char     name_original[64];  /* raw EDID name; empty for built-in or unavailable */
+
+    uint32_t id;                 /* CGDirectDisplayID */
+    float    scale;              /* backingScaleFactor (1.0, 2.0) */
+
+    int      bounds_x;           /* global display origin in logical points */
+    int      bounds_y;
+    int      bounds_w;           /* logical points */
+    int      bounds_h;
+
+    int      work_x;             /* visibleFrame — bounds minus menu bar / dock */
+    int      work_y;
+    int      work_w;
+    int      work_h;
+
+    int      pixels_w;           /* physical pixels of current display mode */
+    int      pixels_h;
+
+    int      size_mm_w;          /* panel physical size in mm; 0 if unknown */
+    int      size_mm_h;
+
+    float    refresh_hz;         /* 0.0 if variable / unavailable (ProMotion) */
+
+    bool     builtin;            /* CGDisplayIsBuiltin */
+    bool     is_main;            /* CGDisplayIsMain — system primary */
+    bool     is_online;          /* CGDisplayIsOnline */
+    bool     rotation_supported; /* IOFramebuffer kIOFBRotateMask has bits beyond 0° */
+
+    uint32_t mirrors_id;         /* CGDisplayMirrorsDisplay — id mirrored, 0 if not mirroring */
+    int      rotation;           /* 0/90/180/270 (CGDisplayRotation) */
+
+    platform_connection_type_t connection_type;
+} platform_display_info_t;
+
+/* Returns number of displays; fills up to `max` entries in out[] */
+int platform_get_displays(platform_display_info_t *out, int max);
+
+typedef struct {
+    int   width, height;         /* logical points */
+    int   pixels_w, pixels_h;    /* physical pixels */
+    float refresh_hz;
+    bool  is_current;            /* mode currently active for this display */
+} platform_video_mode_t;
+
+/* Returns number of modes for the given display; fills up to `max` entries */
+int platform_get_display_modes(uint32_t display_id, platform_video_mode_t *out, int max);
+
+/* CGDirectDisplayID of the display the window is currently on; match against
+   platform_display_info_t.id from platform_get_displays. */
+uint32_t platform_get_window_display_id(void);
+
 #endif /* PLATFORM_H */
