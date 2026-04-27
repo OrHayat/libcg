@@ -2,6 +2,7 @@
 #import <Cocoa/Cocoa.h>
 #import <IOKit/graphics/IOGraphicsLib.h>
 #import <IOKit/IOKitLib.h>
+#include <stdio.h>
 #include <string.h>
 
 /* --- Private types (needed by the public API signatures) --- */
@@ -754,4 +755,12 @@ uint32_t platform_get_window_display_id(void) {
     if (!screen) screen = [NSScreen mainScreen];
     NSNumber *num = [screen deviceDescription][@"NSScreenNumber"];
     return num ? (uint32_t)[num unsignedIntValue] : 0;
+}
+
+/* --- New callback API (skeleton — implementation lands in PR 2.2) --- */
+
+int platform_run(const platform_app_desc_t *desc) {
+    (void)desc;
+    fprintf(stderr, "platform_run: not implemented yet (skeleton)\n");
+    return -1;
 }
