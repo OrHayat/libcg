@@ -50,13 +50,6 @@ typedef enum {
     PLATFORM_KEY_COUNT
 } platform_key_t;
 
-#define PLATFORM_TEXT_BUFFER 16
-
-typedef struct {
-    int  half_transition_count;
-    bool ended_down;
-} platform_button_t;
-
 typedef enum {
     PLATFORM_MOUSE_LEFT   = 0,
     PLATFORM_MOUSE_RIGHT  = 1,
@@ -64,67 +57,138 @@ typedef enum {
     PLATFORM_MOUSE_COUNT
 } platform_mouse_button_t;
 
-typedef struct {
-    platform_button_t buttons[PLATFORM_MOUSE_COUNT];
-    int   x, y;
-    float scroll_dx, scroll_dy;
-} platform_mouse_t;
+/* ============================================================
+   Events. The platform delivers each input event through event_cb
+   exactly once, in arrival order, before the next frame_cb fires.
+   Callers must only read the union member matching event.kind.
+   For PLATFORM_EV_FOCUS / UNFOCUS / QUIT_REQUESTED / NONE the
+   union contents are unspecified.
+   ============================================================ */
+
+typedef enum {
+    PLATFORM_EV_NONE = 0,
+    PLATFORM_EV_KEY_DOWN,
+    PLATFORM_EV_KEY_UP,
+    PLATFORM_EV_TEXT_INPUT,        /* one printable codepoint per event */
+    PLATFORM_EV_MOUSE_DOWN,
+    PLATFORM_EV_MOUSE_UP,
+    PLATFORM_EV_MOUSE_MOVE,
+    PLATFORM_EV_SCROLL,
+    PLATFORM_EV_RESIZE,            /* framebuffer dimensions changed */
+    PLATFORM_EV_FOCUS,             /* no payload */
+    PLATFORM_EV_UNFOCUS,           /* no payload */
+    PLATFORM_EV_QUIT_REQUESTED,    /* no payload */
+    PLATFORM_EV_COUNT
+} platform_event_kind_t;
 
 typedef struct {
-    platform_button_t keys[PLATFORM_KEY_COUNT];
-    platform_mouse_t  mouse;
-    bool quit_requested;
+    platform_key_t key;
+    bool           repeat;
+} platform_key_event_t;
 
-    /* text input typed this frame (printable characters only) */
-    char  text[PLATFORM_TEXT_BUFFER];
-    int   text_len;
-} platform_input_t;
+typedef struct {
+    char ch[8];                      /* one UTF-8 codepoint (1-4 bytes) + null terminator */
+} platform_text_event_t;
 
-static inline bool platform_is_key_down(const platform_input_t *input, platform_key_t k) {
-    return input->keys[k].ended_down;
-}
-static inline bool platform_is_key_pressed(const platform_input_t *input, platform_key_t k) {
-    return input->keys[k].half_transition_count >= 1 && input->keys[k].ended_down;
-}
-static inline bool platform_is_key_released(const platform_input_t *input, platform_key_t k) {
-    return input->keys[k].half_transition_count >= 1 && !input->keys[k].ended_down;
-}
+typedef struct {
+    platform_mouse_button_t btn;
+    int                     x, y;
+} platform_mouse_event_t;
 
-static inline bool platform_is_mouse_down(const platform_input_t *input, platform_mouse_button_t b) {
-    return input->mouse.buttons[b].ended_down;
-}
-static inline bool platform_is_mouse_pressed(const platform_input_t *input, platform_mouse_button_t b) {
-    return input->mouse.buttons[b].half_transition_count >= 1 && input->mouse.buttons[b].ended_down;
-}
-static inline bool platform_is_mouse_released(const platform_input_t *input, platform_mouse_button_t b) {
-    return input->mouse.buttons[b].half_transition_count >= 1 && !input->mouse.buttons[b].ended_down;
-}
+typedef struct {
+    int x, y;                        /* current cursor position */
+    int dx, dy;                      /* delta since last move */
+} platform_mouse_move_event_t;
 
-/* Lifecycle */
-bool platform_init(int width, int height, const char *title);
-void platform_shutdown(void);
+typedef struct {
+    float dx, dy;
+} platform_scroll_event_t;
 
-/* Per-frame. Polled-API contract:
-   - platform_present() hands the framebuffer to the OS compositor and
-     allocates a fresh one for the next frame. The fb->pixels pointer is
-     not stable across present calls — re-fetch each iteration, do not
-     cache.
-   - The fresh buffer is zero-initialized. Whatever you wrote last frame
-     is gone; render the full frame each iteration (or maintain your own
-     persistent buffer separate from the platform fb). */
-void platform_poll_events(platform_input_t *input);
-void platform_present(void);
+typedef struct {
+    int w, h;                        /* logical points */
+    int fb_w, fb_h;                  /* physical pixels (= w/h × backing scale) */
+} platform_resize_event_t;
 
-/* Accessors. The returned struct pointer is stable, but its `pixels`
-   field changes each platform_present(). Re-read pixels through the
-   struct on every use. */
+typedef struct {
+    platform_event_kind_t kind;
+    uint64_t              frame_index; /* matches platform_frame_count() at delivery */
+
+    union {                            /* anonymous — access as e->key.key */
+        platform_key_event_t        key;
+        platform_text_event_t       text;
+        platform_mouse_event_t      mouse;
+        platform_mouse_move_event_t move;
+        platform_scroll_event_t     scroll;
+        platform_resize_event_t     resize;
+    };
+} platform_event_t;
+
+/* ============================================================
+   App descriptor + entry point. Sokol/SDL3-style: caller fills in
+   a desc struct and platform_run owns the event loop. frame_cb is
+   the only required callback; init_cb / event_cb / cleanup_cb are
+   optional.
+   ============================================================ */
+
+typedef struct {
+    /* Lifecycle */
+    void (*init_cb)   (void *user_data);
+    void (*frame_cb)  (void *user_data);                                  /* required */
+    void (*event_cb)  (const platform_event_t *e, void *user_data);
+    void (*cleanup_cb)(void *user_data);
+
+    /* Window config */
+    int         width;
+    int         height;
+    const char *title;
+    bool        transparent;       /* setOpaque:NO + clearColor */
+    bool        resizable;
+    bool        high_dpi;          /* allocate fb at backing pixel size, not logical */
+
+    /* Opaque pointer passed back to all callbacks */
+    void       *user_data;
+} platform_app_desc_t;
+
+/* The application provides main() and calls platform_run(desc) with its
+   callbacks and window configuration. platform_run owns the event loop,
+   drives the desc callbacks, and returns when the window closes or
+   platform_request_quit() flips the running flag. main() should return
+   platform_run's result. */
+int platform_run(const platform_app_desc_t *desc);
+
+/* Request the run loop to exit. The next iteration runs cleanup_cb and
+   returns from platform_run, even if the OS window is still open.
+   No-op outside platform_run. */
+void platform_request_quit(void);
+
+/* ============================================================
+   Accessors — call from inside any of the desc callbacks.
+   ============================================================ */
+
+/* Writable framebuffer for the current frame. fb->pixels is valid for
+   the duration of one frame_cb call only — do not cache the pointer
+   past the call. fb->width/height reflect the current backing size and
+   may differ from the previous frame after a resize. */
 platform_framebuffer_t *platform_get_framebuffer(void);
+
+/* Monotonic seconds since the start of platform_run. */
+double platform_now(void);
+
+/* Seconds elapsed since the previous frame_cb returned. 0 on the first
+   frame. */
+double platform_dt(void);
+
+/* Number of completed frames (i.e. the index of the current frame_cb
+   call, starting at 0). */
+uint64_t platform_frame_count(void);
 
 /* Window controls */
 void platform_toggle_fullscreen(void);
 bool platform_is_fullscreen(void);
 
-/* Display info */
+/* ============================================================
+   Display info (multi-monitor enumeration / video modes).
+   ============================================================ */
 
 typedef enum {
     PLATFORM_CONNECTION_UNKNOWN = 0,
@@ -189,128 +253,5 @@ int platform_get_display_modes(uint32_t display_id, platform_video_mode_t *out, 
 /* CGDirectDisplayID of the display the window is currently on; match against
    platform_display_info_t.id from platform_get_displays. */
 uint32_t platform_get_window_display_id(void);
-
-/* ============================================================
-   New callback-based API (Sokol/SDL3 style — work in progress)
-
-   Game declares an app desc with callbacks and calls platform_run().
-   Platform owns the run loop, event dispatch, and rendering trigger.
-   Replaces the old polled API in subsequent refactor PRs (#17 fix).
-   ============================================================ */
-
-typedef enum {
-    PLATFORM_EV_NONE = 0,
-    PLATFORM_EV_KEY_DOWN,
-    PLATFORM_EV_KEY_UP,
-    PLATFORM_EV_TEXT_INPUT,        /* one printable codepoint per event */
-    PLATFORM_EV_MOUSE_DOWN,
-    PLATFORM_EV_MOUSE_UP,
-    PLATFORM_EV_MOUSE_MOVE,
-    PLATFORM_EV_SCROLL,
-    PLATFORM_EV_RESIZE,            /* framebuffer dimensions changed */
-    PLATFORM_EV_FOCUS,             /* no payload */
-    PLATFORM_EV_UNFOCUS,           /* no payload */
-    PLATFORM_EV_QUIT_REQUESTED,    /* no payload */
-    PLATFORM_EV_COUNT
-} platform_event_kind_t;
-
-/* Per-arm event types — referenced by name from the union in
-   platform_event_t below. Extracted as named typedefs (rather than
-   anonymous structs) so callers can pass single arms to helper functions
-   and so future per-event callbacks can take them by type.
-
-   Payload contract: callers MUST only read the union member matching
-   event.kind. For PLATFORM_EV_FOCUS / UNFOCUS / QUIT_REQUESTED / NONE,
-   the union contents are unspecified — there is no payload arm to read.
-   Multi-character paste-style input is delivered as multiple events,
-   one PLATFORM_EV_TEXT_INPUT per codepoint. */
-
-typedef struct {
-    platform_key_t key;
-    bool           repeat;
-} platform_key_event_t;
-
-typedef struct {
-    char ch[8];                      /* one UTF-8 codepoint (1-4 bytes) + null terminator */
-} platform_text_event_t;
-
-typedef struct {
-    platform_mouse_button_t btn;
-    int                     x, y;
-} platform_mouse_event_t;
-
-typedef struct {
-    int x, y;                        /* current cursor position */
-    int dx, dy;                      /* delta since last move */
-} platform_mouse_move_event_t;
-
-typedef struct {
-    float dx, dy;
-} platform_scroll_event_t;
-
-typedef struct {
-    int w, h;                        /* logical points */
-    int fb_w, fb_h;                  /* physical pixels (= w/h × backing scale) */
-} platform_resize_event_t;
-
-typedef struct {
-    platform_event_kind_t kind;
-    uint64_t              frame_index; /* same numbering as platform_frame_t.frame_index */
-
-    union {                            /* anonymous — access as e->key.key */
-        platform_key_event_t        key;
-        platform_text_event_t       text;
-        platform_mouse_event_t      mouse;
-        platform_mouse_move_event_t move;
-        platform_scroll_event_t     scroll;
-        platform_resize_event_t     resize;
-    };
-} platform_event_t;
-
-typedef struct {
-    /* Writable backing buffer. fb->pixels is valid for the duration of
-       this frame_cb call only — do not cache the pointer past the call.
-       The platform hands ownership of the buffer to the OS compositor on
-       commit and allocates a fresh one for the next frame. */
-    platform_framebuffer_t *fb;
-    double                  dt;        /* seconds since last frame */
-    double                  time;      /* seconds since app start */
-    uint64_t                frame_index;
-} platform_frame_t;
-
-typedef struct {
-    /* Lifecycle. frame_cb is required; init_cb / event_cb / cleanup_cb may
-       be NULL. event_cb is declared for API stability but not yet invoked —
-       input is currently driven by frame_cb calling platform_poll_events.
-       Event dispatch through event_cb lands when the polled API retires. */
-    void (*init_cb)   (void *user_data);
-    void (*frame_cb)  (const platform_frame_t *f, void *user_data);
-    void (*event_cb)  (const platform_event_t *e, void *user_data); /* WIP — not yet wired */
-    void (*cleanup_cb)(void *user_data);
-
-    /* Window config. transparent/resizable/high_dpi are not yet plumbed
-       through platform_run — platform_init currently hardcodes all three.
-       They'll be honored once a caller actually needs to opt out. */
-    int         width;
-    int         height;
-    const char *title;
-    bool        transparent;       /* setOpaque:NO + clearColor */
-    bool        resizable;
-    bool        high_dpi;
-
-    /* Opaque pointer passed back to all callbacks */
-    void       *user_data;
-} platform_app_desc_t;
-
-/* The application provides main() and calls platform_run(desc) with its
-   callbacks and window configuration. platform_run owns the event loop,
-   drives the desc callbacks, and returns when the window closes. The
-   application's main() should return platform_run's result. */
-int platform_run(const platform_app_desc_t *desc);
-
-/* Game requests the run loop to exit. The platform_run loop notices on its
-   next iteration, runs cleanup_cb, and returns — even if the OS window is
-   still open. No-op outside platform_run. */
-void platform_request_quit(void);
 
 #endif /* PLATFORM_H */
