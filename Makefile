@@ -6,7 +6,7 @@ UNAME_S := $(shell uname -s)
 
 ifeq ($(UNAME_S),Darwin)
     PLATFORM_SRC = src/platform/platform_macos.m
-    LDFLAGS      = -framework Cocoa -framework IOKit
+    LDFLAGS      = -framework Cocoa -framework QuartzCore -framework IOKit
     OBJCFLAGS    = -fobjc-arc
 endif
 
