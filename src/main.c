@@ -344,8 +344,9 @@ static void on_cleanup(void *ud) {
 static void on_frame(const platform_frame_t *f, void *ud) {
     (void)ud;
 
-    /* All loop-local state lives here as statics. PR 2.4 will clean these
-       into a proper game_state_t once event-based input lands. */
+    /* All loop-local state lives here as statics. Will be lifted into a
+       proper game_state_t once event-driven input lands and the frame_cb
+       gets a stable user_data instead of polling fresh every call. */
     static bool print_mouse_coords = false;
     static bool bg_checkerboard    = false;
     static bool paint_mode         = false;

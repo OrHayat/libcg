@@ -281,8 +281,8 @@ typedef struct {
 typedef struct {
     /* Lifecycle. frame_cb is required; init_cb / event_cb / cleanup_cb may
        be NULL. event_cb is declared for API stability but not yet invoked —
-       in this transitional design, frame_cb drives input via
-       platform_poll_events. event dispatch lands in PR 2.4. */
+       input is currently driven by frame_cb calling platform_poll_events.
+       Event dispatch through event_cb lands when the polled API retires. */
     void (*init_cb)   (void *user_data);
     void (*frame_cb)  (const platform_frame_t *f, void *user_data);
     void (*event_cb)  (const platform_event_t *e, void *user_data); /* WIP — not yet wired */
