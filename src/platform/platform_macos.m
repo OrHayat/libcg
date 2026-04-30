@@ -7,7 +7,20 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Buffer ownership model:
+/* ============================================================
+   Event queue. NSResponder methods on LibcgView and NSWindowDelegate
+   methods on AppDelegate enqueue platform_event_t. drain_event_queue
+   drains the queue and dispatches each via desc->event_cb. Drain runs
+   at the top of present_frame, so ordering is: pump_events fills the
+   queue → present_frame drains it → frame_cb runs → commit. During
+   tracking-mode resize the delegate calls present_frame directly,
+   which still drains its own queued resize events before frame_cb.
+   ============================================================ */
+
+#define EVENT_QUEUE_CAPACITY 256
+
+/* ============================================================
+   Buffer ownership model:
    - state.fb.pixels is the active rendering target. frame_cb writes into it.
    - On commit_to_layer the buffer is handed (no copy) to a CGDataProvider
      whose release callback frees it. The CGImage built from that provider
@@ -16,16 +29,28 @@
    - commit_to_layer then allocates a fresh state.fb.pixels at state.next_w
      × state.next_h for the following frame.
    - Resize delegates only update state.next_w/h. The size flips on the
-     next sync_fb_size — never mid-frame, never inside the pump. This kills
-     the realloc-vs-present race at the architectural level. */
+     next sync_fb_size — never mid-frame, never inside the pump.
+   ============================================================ */
 typedef struct {
     NSApplication *ns_app;
     NSWindow *ns_window;
     NSView *ns_view;
     platform_framebuffer_t fb;     /* pixels owned for one frame at a time */
     int next_w, next_h;            /* pending backing size */
-    platform_input_t pending;
+    int last_mouse_x, last_mouse_y;/* for synthesizing dx/dy on MOUSE_MOVE */
     bool running;
+
+    /* Event ring buffer */
+    platform_event_t events[EVENT_QUEUE_CAPACITY];
+    int events_head;
+    int events_tail;
+
+    /* Active platform_run desc + timing */
+    const platform_app_desc_t *active_desc;
+    CFAbsoluteTime t0;
+    CFAbsoluteTime t_prev;
+    CFAbsoluteTime t_now;          /* start-of-current-frame_cb timestamp */
+    uint64_t frame_count;
 } platform_state_t;
 
 static platform_state_t state;
@@ -89,23 +114,54 @@ static const platform_key_t kc_to_key[256] = {
 };
 // clang-format on
 
-/* --- LibcgView (custom NSView; presentation is via layer.contents) --- */
+/* --- Forward decls --- */
+static void enqueue_event(const platform_event_t *e);
+static void sync_fb_size(void);
+static void present_frame(void);
+static void commit_to_layer(void);
+static NSSize get_backing_size(NSWindow *window);
 
-/* Forward decls for rendering helpers; full bodies live further down. */
-static void sync_fb_size(void);      /* ensure fb.pixels matches next_w/next_h */
-static void present_frame(void);     /* run frame_cb, then hand fb to the layer */
+/* Push an event into the ring buffer. Drops on overflow (logs to stderr).
+   Single-threaded — only called from AppKit handlers and delegate
+   methods on the main thread. */
+static void enqueue_event(const platform_event_t *e) {
+    int next = (state.events_tail + 1) % EVENT_QUEUE_CAPACITY;
+    if (next == state.events_head) {
+        fprintf(stderr, "platform: event queue full, dropping event kind=%d\n", e->kind);
+        return;
+    }
+    state.events[state.events_tail] = *e;
+    state.events[state.events_tail].frame_index = state.frame_count;
+    state.events_tail = next;
+}
+
+/* Drain queued events into desc->event_cb. Called from present_frame
+   before frame_cb. Drops all events if event_cb is NULL. */
+static void drain_event_queue(void) {
+    if (!state.active_desc) {
+        state.events_head = state.events_tail;
+        return;
+    }
+    if (!state.active_desc->event_cb) {
+        state.events_head = state.events_tail;
+        return;
+    }
+    while (state.events_head != state.events_tail) {
+        platform_event_t e = state.events[state.events_head];
+        state.events_head = (state.events_head + 1) % EVENT_QUEUE_CAPACITY;
+        state.active_desc->event_cb(&e, state.active_desc->user_data);
+    }
+}
+
+/* --- LibcgView (custom NSView; NSResponder for input events) --- */
 
 @interface LibcgView : NSView
 @end
 
 @implementation LibcgView
-/* No-op. This is a layer-backed view and frames flow into layer.contents
-   via present_frame() (callback API) / platform_present() (legacy polled
-   API). AppKit composites the current layer.contents on its own for
-   damage / expose / occlusion — drawRect: doesn't need to repaint anything.
-   Calling commit_to_layer here was the source of the startup flash: AppKit
-   could fire drawRect: during view setup before any frame had been
-   rendered, committing an all-zero (transparent) buffer to layer.contents. */
+/* No-op. Layer-backed view with explicit layer.contents — frames flow into
+   the layer via commit_to_layer. AppKit composites the existing contents
+   on damage / expose / occlusion without our involvement. */
 - (void)drawRect:(NSRect)dirtyRect {
     (void)dirtyRect;
 }
@@ -120,52 +176,60 @@ static void present_frame(void);     /* run frame_cb, then hand fb to the layer 
     return YES;
 }
 
-// Record key-down transition. Repeats are filtered — we track physical
-// press/release, not the OS auto-repeat stream.
-- (void)keyDown:(NSEvent *)event {
-    platform_key_t key = kc_to_key[[event keyCode] & 0xFF];
-    if (key == PLATFORM_KEY_UNKNOWN)
-        return;
-    state.pending.keys[key].half_transition_count++;
-    if (![event isARepeat]) {
-        state.pending.keys[key].ended_down = true;
-    }
+- (void)keyDown:(NSEvent *)nsevent {
+    platform_key_t key = kc_to_key[[nsevent keyCode] & 0xFF];
+    if (key == PLATFORM_KEY_UNKNOWN) return;
 
-    /* Capture printable characters into the text input buffer */
-    NSString *chars = [event characters];
+    platform_event_t e = {
+        .kind = PLATFORM_EV_KEY_DOWN,
+        .key  = { .key = key, .repeat = (bool)[nsevent isARepeat] },
+    };
+    enqueue_event(&e);
+
+    /* Capture printable ASCII characters as PLATFORM_EV_TEXT_INPUT events,
+       one per codepoint. Multi-byte UTF-8 input would land here as multiple
+       single-byte events — caller would see fragmented codepoints. The
+       platform_text_event_t.ch array can hold a full 1-4 byte codepoint;
+       extending to proper UTF-8 codepoint slicing is a follow-up. */
+    NSString *chars = [nsevent characters];
     if (chars && [chars length] > 0) {
         const char *cstr = [chars UTF8String];
-        for (const char *p = cstr; *p && state.pending.text_len < PLATFORM_TEXT_BUFFER - 1; p++) {
+        for (const char *p = cstr; *p; p++) {
             unsigned char c = (unsigned char)*p;
             if (c >= 0x20 && c < 0x7F) {
-                state.pending.text[state.pending.text_len++] = (char)c;
+                platform_event_t te = {
+                    .kind = PLATFORM_EV_TEXT_INPUT,
+                };
+                te.text.ch[0] = (char)c;
+                te.text.ch[1] = '\0';
+                enqueue_event(&te);
             }
         }
-        state.pending.text[state.pending.text_len] = '\0';
     }
 }
 
-// Record key-up transition.
-- (void)keyUp:(NSEvent *)event {
-    platform_key_t key = kc_to_key[[event keyCode] & 0xFF];
-    if (key == PLATFORM_KEY_UNKNOWN)
-        return;
-    state.pending.keys[key].half_transition_count++;
-    state.pending.keys[key].ended_down = false;
+- (void)keyUp:(NSEvent *)nsevent {
+    platform_key_t key = kc_to_key[[nsevent keyCode] & 0xFF];
+    if (key == PLATFORM_KEY_UNKNOWN) return;
+
+    platform_event_t e = {
+        .kind = PLATFORM_EV_KEY_UP,
+        .key  = { .key = key, .repeat = false },
+    };
+    enqueue_event(&e);
 }
 
 // Modifier keys (shift, ctrl, alt, cmd, caps lock) don't fire keyDown:/keyUp:.
-// AppKit sends flagsChanged: instead. We use device-specific masks (NX_DEVICE*)
+// AppKit sends flagsChanged: instead. Use device-specific masks (NX_DEVICE*)
 // from IOKit to distinguish left from right modifiers — the high-level
 // NSEventModifierFlag* constants merge both sides into one bit.
 // clang-format off
-- (void)flagsChanged:(NSEvent *)event {
-    unsigned short keyCode = [event keyCode] & 0xFF;
+- (void)flagsChanged:(NSEvent *)nsevent {
+    unsigned short keyCode = [nsevent keyCode] & 0xFF;
     platform_key_t key = kc_to_key[keyCode];
-    if (key == PLATFORM_KEY_UNKNOWN)
-        return;
+    if (key == PLATFORM_KEY_UNKNOWN) return;
 
-    NSUInteger flags = [event modifierFlags];
+    NSUInteger flags = [nsevent modifierFlags];
     bool is_down;
     switch (keyCode) {
         case 0x38: is_down = (flags & NX_DEVICELSHIFTKEYMASK) != 0; break;
@@ -181,65 +245,66 @@ static void present_frame(void);     /* run frame_cb, then hand fb to the layer 
     }
     // clang-format on
 
-    if (is_down != state.pending.keys[key].ended_down) {
-        state.pending.keys[key].half_transition_count++;
-        state.pending.keys[key].ended_down = is_down;
-    }
+    platform_event_t e = {
+        .kind = is_down ? PLATFORM_EV_KEY_DOWN : PLATFORM_EV_KEY_UP,
+        .key  = { .key = key, .repeat = false },
+    };
+    enqueue_event(&e);
 }
 
-- (void)updateMousePosition:(NSEvent *)event {
-    NSPoint local = [self convertPoint:[event locationInWindow] fromView:nil];
-    state.pending.mouse.x = (int)local.x;
-    state.pending.mouse.y = (int)local.y;
+- (NSPoint)mousePosition:(NSEvent *)nsevent {
+    return [self convertPoint:[nsevent locationInWindow] fromView:nil];
 }
 
-- (void)mouseMoved:(NSEvent *)event {
-    [self updateMousePosition:event];
-}
-- (void)mouseDragged:(NSEvent *)event {
-    [self updateMousePosition:event];
-}
-- (void)rightMouseDragged:(NSEvent *)event {
-    [self updateMousePosition:event];
-}
-- (void)otherMouseDragged:(NSEvent *)event {
-    [self updateMousePosition:event];
-}
-
-- (void)mouseDown:(NSEvent *)event {
-    [self updateMousePosition:event];
-    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].half_transition_count++;
-    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].ended_down = true;
-}
-- (void)mouseUp:(NSEvent *)event {
-    [self updateMousePosition:event];
-    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].half_transition_count++;
-    state.pending.mouse.buttons[PLATFORM_MOUSE_LEFT].ended_down = false;
-}
-- (void)rightMouseDown:(NSEvent *)event {
-    [self updateMousePosition:event];
-    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].half_transition_count++;
-    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].ended_down = true;
-}
-- (void)rightMouseUp:(NSEvent *)event {
-    [self updateMousePosition:event];
-    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].half_transition_count++;
-    state.pending.mouse.buttons[PLATFORM_MOUSE_RIGHT].ended_down = false;
-}
-- (void)otherMouseDown:(NSEvent *)event {
-    [self updateMousePosition:event];
-    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].half_transition_count++;
-    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].ended_down = true;
-}
-- (void)otherMouseUp:(NSEvent *)event {
-    [self updateMousePosition:event];
-    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].half_transition_count++;
-    state.pending.mouse.buttons[PLATFORM_MOUSE_MIDDLE].ended_down = false;
+- (void)dispatchMouseMove:(NSEvent *)nsevent {
+    NSPoint p = [self mousePosition:nsevent];
+    int x = (int)p.x, y = (int)p.y;
+    platform_event_t e = {
+        .kind = PLATFORM_EV_MOUSE_MOVE,
+        .move = {
+            .x = x, .y = y,
+            .dx = x - state.last_mouse_x,
+            .dy = y - state.last_mouse_y,
+        },
+    };
+    state.last_mouse_x = x;
+    state.last_mouse_y = y;
+    enqueue_event(&e);
 }
 
-- (void)scrollWheel:(NSEvent *)event {
-    state.pending.mouse.scroll_dx += (float)[event scrollingDeltaX];
-    state.pending.mouse.scroll_dy += (float)[event scrollingDeltaY];
+- (void)mouseMoved:(NSEvent *)nsevent        { [self dispatchMouseMove:nsevent]; }
+- (void)mouseDragged:(NSEvent *)nsevent      { [self dispatchMouseMove:nsevent]; }
+- (void)rightMouseDragged:(NSEvent *)nsevent { [self dispatchMouseMove:nsevent]; }
+- (void)otherMouseDragged:(NSEvent *)nsevent { [self dispatchMouseMove:nsevent]; }
+
+- (void)dispatchMouseButton:(NSEvent *)nsevent kind:(platform_event_kind_t)kind btn:(platform_mouse_button_t)btn {
+    NSPoint p = [self mousePosition:nsevent];
+    int x = (int)p.x, y = (int)p.y;
+    platform_event_t e = {
+        .kind = kind,
+        .mouse = { .btn = btn, .x = x, .y = y },
+    };
+    enqueue_event(&e);
+    state.last_mouse_x = x;
+    state.last_mouse_y = y;
+}
+
+- (void)mouseDown:(NSEvent *)e        { [self dispatchMouseButton:e kind:PLATFORM_EV_MOUSE_DOWN btn:PLATFORM_MOUSE_LEFT]; }
+- (void)mouseUp:(NSEvent *)e          { [self dispatchMouseButton:e kind:PLATFORM_EV_MOUSE_UP   btn:PLATFORM_MOUSE_LEFT]; }
+- (void)rightMouseDown:(NSEvent *)e   { [self dispatchMouseButton:e kind:PLATFORM_EV_MOUSE_DOWN btn:PLATFORM_MOUSE_RIGHT]; }
+- (void)rightMouseUp:(NSEvent *)e     { [self dispatchMouseButton:e kind:PLATFORM_EV_MOUSE_UP   btn:PLATFORM_MOUSE_RIGHT]; }
+- (void)otherMouseDown:(NSEvent *)e   { [self dispatchMouseButton:e kind:PLATFORM_EV_MOUSE_DOWN btn:PLATFORM_MOUSE_MIDDLE]; }
+- (void)otherMouseUp:(NSEvent *)e     { [self dispatchMouseButton:e kind:PLATFORM_EV_MOUSE_UP   btn:PLATFORM_MOUSE_MIDDLE]; }
+
+- (void)scrollWheel:(NSEvent *)nsevent {
+    platform_event_t e = {
+        .kind = PLATFORM_EV_SCROLL,
+        .scroll = {
+            .dx = (float)[nsevent scrollingDeltaX],
+            .dy = (float)[nsevent scrollingDeltaY],
+        },
+    };
+    enqueue_event(&e);
 }
 @end
 
@@ -250,125 +315,59 @@ static void present_frame(void);     /* run frame_cb, then hand fb to the layer 
 
 static NSApplication *create_application(void);
 static NSMenu *create_menu(const char *title);
-static NSWindow *create_window(int w, int h, const char *title, id delegate);
-static NSSize get_backing_size(NSWindow *window);
+static NSWindow *create_window(const platform_app_desc_t *desc, id delegate);
 static void activate_app(NSApplication *app);
 static void pump_events(NSApplication *app);
-static void commit_to_layer(void);
+static bool platform_init(const platform_app_desc_t *desc);
+static void platform_shutdown(void);
 
-/* --- Public API --- */
-
-bool platform_init(int width, int height, const char *title) {
-    state.ns_app = create_application();
-
-    AppDelegate *delegate = [[AppDelegate alloc] init];
-    [state.ns_app setDelegate:delegate];
-
-    [state.ns_app setMainMenu:create_menu(title)];
-
-    state.ns_window = create_window(width, height, title, delegate);
-
-    state.ns_view = [[LibcgView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
-    [state.ns_window setContentView:state.ns_view];
-    [state.ns_window makeFirstResponder:state.ns_view];
-    [state.ns_window setAcceptsMouseMovedEvents:YES];
-
-    /* Layer-backed view with explicit content-placement. Presentation works
-       by assigning CGImages to view.layer.contents — the only path that
-       updates pixels mid-drag during a live resize. The placement controls
-       how the CALayer scales contents when the view bounds change. */
-    [state.ns_view setWantsLayer:YES];
-    state.ns_view.layerContentsPlacement = NSViewLayerContentsPlacementScaleProportionallyToFit;
-
-    // On retina/HiDPI displays the backing store is larger than the logical
-    // window size (e.g. 1280×720 logical → 2560×1440 backing at 2× scale).
-    // Allocate the framebuffer at backing resolution so we render at native
-    // pixel density.
-    NSSize backing = get_backing_size(state.ns_window);
-    state.next_w  = (int)backing.width;
-    state.next_h  = (int)backing.height;
-    state.fb.width  = state.next_w;
-    state.fb.height = state.next_h;
-    state.fb.pixels = calloc((size_t)state.next_w * (size_t)state.next_h, sizeof(uint32_t));
-
-    activate_app(state.ns_app);
-    pump_events(state.ns_app);
-
-    state.running = true;
-    return true;
-}
-
-void platform_shutdown(void) {
-    free(state.fb.pixels);
-    state.fb.pixels = NULL;
-    [state.ns_window close];
-    state.running = false;
-}
-
-void platform_poll_events(platform_input_t *input) {
-    // Reset per-frame transition counts, preserve held state.
-    for (int i = 0; i < PLATFORM_KEY_COUNT; i++)
-        state.pending.keys[i].half_transition_count = 0;
-    for (int i = 0; i < PLATFORM_MOUSE_COUNT; i++)
-        state.pending.mouse.buttons[i].half_transition_count = 0;
-    state.pending.mouse.scroll_dx = 0.0f;
-    state.pending.mouse.scroll_dy = 0.0f;
-    state.pending.text_len = 0;
-    state.pending.text[0] = '\0';
-    // mouse_x, mouse_y persist in state.pending across frames.
-
-    pump_events(state.ns_app);
-
-    /* Apply any resize that fired from a delegate during pump_events
-       BEFORE the caller observes fb. Otherwise the legacy polled API
-       would render one frame at the previous size after every resize
-       (caller reads stale fb dims, renders, presents at stale size). */
-    sync_fb_size();
-
-    *input = state.pending;
-    input->quit_requested = !state.running;
-}
-
-void platform_present(void) {
-    /* Hands fb.pixels to the layer (ownership transfer; the layer owns it
-       until the next commit replaces it) and allocates a fresh fb.pixels
-       for the next frame at the pending size. Polled-API callers must
-       re-fetch via platform_get_framebuffer() each iteration — the pointer
-       is per-frame, not stable across present calls. */
-    commit_to_layer();
-}
-
-platform_framebuffer_t *platform_get_framebuffer(void) {
-    return &state.fb;
-}
-
-/* --- AppDelegate implementation --- */
+/* --- AppDelegate (NSWindowDelegate) --- */
 
 @implementation AppDelegate
 
-// Manual event pump doesn't run the runloop deep enough to trigger AppKit's
-// auto-terminate flow, so hook the window-close notification directly and
-// drop `running` to exit the C main loop.
 - (void)windowWillClose:(NSNotification *)notification {
     (void)notification;
     state.running = false;
+    platform_event_t e = { .kind = PLATFORM_EV_QUIT_REQUESTED };
+    enqueue_event(&e);
 }
 
-/* All resize delegates do the same thing: stash the new backing size in
-   state.next_w/h and trigger a present. The buffer doesn't get touched
-   here — sync_fb_size at the top of present_frame (or commit_to_layer's
-   tail allocation) flips to the new size between frames, never mid-frame.
-   This is why we don't need re-entry-safe reallocate_framebuffer anymore:
-   the dangerous "free buffer being written to" sequence can't form. */
-static void update_pending_size(void) {
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    (void)notification;
+    platform_event_t e = { .kind = PLATFORM_EV_FOCUS };
+    enqueue_event(&e);
+}
+
+- (void)windowDidResignKey:(NSNotification *)notification {
+    (void)notification;
+    platform_event_t e = { .kind = PLATFORM_EV_UNFOCUS };
+    enqueue_event(&e);
+}
+
+/* All resize delegates: stash the new backing size in state.next_w/h,
+   queue a PLATFORM_EV_RESIZE, then trigger a present so frames keep
+   flowing during AppKit's tracking-mode runloop. */
+static void update_pending_size_and_queue_event(void) {
     NSSize backing = get_backing_size(state.ns_window);
     state.next_w = (int)backing.width;
     state.next_h = (int)backing.height;
+
+    NSRect content = [state.ns_window contentRectForFrameRect:[state.ns_window frame]];
+    platform_event_t e = {
+        .kind = PLATFORM_EV_RESIZE,
+        .resize = {
+            .w    = (int)content.size.width,
+            .h    = (int)content.size.height,
+            .fb_w = state.next_w,
+            .fb_h = state.next_h,
+        },
+    };
+    enqueue_event(&e);
 }
 
 - (void)windowDidResize:(NSNotification *)notification {
     (void)notification;
-    update_pending_size();
+    update_pending_size_and_queue_event();
     present_frame();
 }
 
@@ -378,7 +377,7 @@ static void update_pending_size(void) {
 // the backing pixel size does, and our framebuffer needs to follow.
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification {
     (void)notification;
-    update_pending_size();
+    update_pending_size_and_queue_event();
     present_frame();
 }
 
@@ -387,7 +386,7 @@ static void update_pending_size(void) {
 // next_w/next_h won't change.
 - (void)windowDidChangeScreen:(NSNotification *)notification {
     (void)notification;
-    update_pending_size();
+    update_pending_size_and_queue_event();
     present_frame();
 }
 
@@ -403,12 +402,8 @@ static NSSize get_backing_size(NSWindow *window) {
     return [view convertSizeToBacking:logical];
 }
 
-/* Bring fb.pixels in line with the pending size. Called at the top of
-   present_frame so the size only flips between frames, never mid-frame.
-   Same-size is a no-op. The old buffer (if any) is freed; the new one
-   is calloc'd fresh — frame_cb is expected to fully overwrite it, but
-   zero-init is cheap insurance against a frame_cb that reads before it
-   writes. */
+/* Bring fb.pixels in line with the pending size. Same-size = no-op.
+   Old buffer (if any) is freed; new one is calloc'd fresh. */
 static void sync_fb_size(void) {
     if (state.fb.pixels && state.fb.width == state.next_w && state.fb.height == state.next_h) {
         return;
@@ -426,14 +421,11 @@ static NSApplication *create_application(void) {
 }
 
 // Build a minimal menu bar: one app menu with a Quit item bound to Cmd-Q.
-// Caller is responsible for installing it via setMainMenu:.
 static NSMenu *create_menu(const char *title) {
-    // top bar + first slot (AppKit auto-labels this with the app name)
     NSMenu *menubar = [[NSMenu alloc] init];
     NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
     [menubar addItem:appMenuItem];
 
-    // dropdown that hangs off the app slot, with just "Quit <title>" in it
     NSMenu *appMenu = [[NSMenu alloc] init];
     NSString *quitTitle = [NSString stringWithFormat:@"Quit %s", title];
     NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:quitTitle
@@ -445,24 +437,26 @@ static NSMenu *create_menu(const char *title) {
     return menubar;
 }
 
-static NSWindow *create_window(int width, int height, const char *title, id delegate) {
-    // clang-format off
+static NSWindow *create_window(const platform_app_desc_t *desc, id delegate) {
     NSUInteger style = NSWindowStyleMaskTitled
                      | NSWindowStyleMaskClosable
-                     | NSWindowStyleMaskMiniaturizable
-                     | NSWindowStyleMaskResizable;
-    // clang-format on
+                     | NSWindowStyleMaskMiniaturizable;
+    if (desc->resizable) style |= NSWindowStyleMaskResizable;
 
-    NSRect frame = NSMakeRect(0, 0, width, height);
+    NSRect frame = NSMakeRect(0, 0, desc->width, desc->height);
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
                                                    styleMask:style
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
-    [window setTitle:[NSString stringWithUTF8String:title]];
+    [window setTitle:[NSString stringWithUTF8String:desc->title ? desc->title : "libcg"]];
     [window center];
     [window setDelegate:delegate];
-    [window setOpaque:NO];
-    [window setBackgroundColor:[NSColor clearColor]];
+
+    if (desc->transparent) {
+        [window setOpaque:NO];
+        [window setBackgroundColor:[NSColor clearColor]];
+    }
+
     [window makeKeyAndOrderFront:nil];
     return window;
 }
@@ -480,8 +474,10 @@ static void activate_app(NSApplication *app) {
     }
 }
 
-// Drain any pending events. distantPast = non-blocking poll; never enters the
-// runloop, so runloop sources/timers/observers won't fire here.
+// Drain any pending AppKit events. distantPast = non-blocking poll. The
+// NSResponder methods on LibcgView and NSWindowDelegate methods on
+// AppDelegate (called via [NSApp sendEvent:] / notifications) push
+// platform_event_t entries into our event queue.
 static void pump_events(NSApplication *app) {
     @autoreleasepool {
         NSEvent *event;
@@ -492,6 +488,74 @@ static void pump_events(NSApplication *app) {
             [app sendEvent:event];
         }
     }
+}
+
+static bool platform_init(const platform_app_desc_t *desc) {
+    state.ns_app = create_application();
+
+    AppDelegate *delegate = [[AppDelegate alloc] init];
+    [state.ns_app setDelegate:delegate];
+
+    const char *title = desc->title ? desc->title : "libcg";
+    [state.ns_app setMainMenu:create_menu(title)];
+
+    state.ns_window = create_window(desc, delegate);
+
+    state.ns_view = [[LibcgView alloc] initWithFrame:NSMakeRect(0, 0, desc->width, desc->height)];
+    [state.ns_window setContentView:state.ns_view];
+    [state.ns_window makeFirstResponder:state.ns_view];
+    [state.ns_window setAcceptsMouseMovedEvents:YES];
+
+    [state.ns_view setWantsLayer:YES];
+    state.ns_view.layerContentsPlacement = NSViewLayerContentsPlacementScaleProportionallyToFit;
+
+    /* Allocate framebuffer at backing pixels (HiDPI-aware) or logical points
+       (1× rendering, CALayer scales). */
+    NSSize backing = desc->high_dpi
+        ? get_backing_size(state.ns_window)
+        : NSMakeSize(desc->width, desc->height);
+    state.next_w = (int)backing.width;
+    state.next_h = (int)backing.height;
+    state.fb.width  = state.next_w;
+    state.fb.height = state.next_h;
+    state.fb.pixels = calloc((size_t)state.next_w * (size_t)state.next_h, sizeof(uint32_t));
+
+    activate_app(state.ns_app);
+    pump_events(state.ns_app);
+
+    state.running = true;
+    return true;
+}
+
+static void platform_shutdown(void) {
+    free(state.fb.pixels);
+    state.fb.pixels = NULL;
+    [state.ns_window close];
+    state.running = false;
+}
+
+/* --- Public API --- */
+
+void platform_request_quit(void) {
+    state.running = false;
+}
+
+platform_framebuffer_t *platform_get_framebuffer(void) {
+    return &state.fb;
+}
+
+double platform_now(void) {
+    if (state.t0 == 0.0) return 0.0;
+    return state.t_now - state.t0;
+}
+
+double platform_dt(void) {
+    if (state.t_prev == 0.0) return 0.0;
+    return state.t_now - state.t_prev;
+}
+
+uint64_t platform_frame_count(void) {
+    return state.frame_count;
 }
 
 void platform_toggle_fullscreen(void) {
@@ -766,23 +830,10 @@ uint32_t platform_get_window_display_id(void) {
     return num ? (uint32_t)[num unsignedIntValue] : 0;
 }
 
-/* --- New callback API --- */
-
-/* Static state for the active platform_run invocation.
-   CFAbsoluteTime (plain double) instead of NSDate avoids autorelease
-   accumulation in the hot present_frame loop. */
-static const platform_app_desc_t *_libcg_active_desc     = NULL;
-static CFAbsoluteTime             _libcg_run_t0          = 0.0;
-static CFAbsoluteTime             _libcg_run_t_prev      = 0.0;
-static uint64_t                   _libcg_run_frame_index = 0;
-
-void platform_request_quit(void) {
-    state.running = false;
-}
+/* --- Run loop / present --- */
 
 /* CGDataProvider release callback — frees the pixel buffer that was
-   handed to the layer when the CGImage built around it finally drops
-   (typically when the next commit replaces layer.contents). */
+   handed to the layer when the CGImage built around it finally drops. */
 static void release_fb_buffer(void *info, const void *data, size_t size) {
     (void)info;
     (void)size;
@@ -791,20 +842,7 @@ static void release_fb_buffer(void *info, const void *data, size_t size) {
 
 /* Hand the active fb buffer to the layer (ownership transfer — no copy)
    and immediately allocate a fresh fb buffer at the pending size for the
-   next frame. Bypasses AppKit's drawRect coalescing — Core Animation's
-   main-thread transactions commit during live-resize tracking-mode
-   runloops, so pixels reach screen mid-drag.
-
-   Why ownership transfer (not copy-on-commit):
-   CGBitmapContextCreateImage's documented copy-on-write only triggers on
-   CGContext-API drawing. We mutate pixels via raw pointer writes which CG
-   can't observe, so any CGImage made from a shared bitmap context is
-   effectively aliasing our buffer. The earlier snapshot+provider workaround
-   memcpy'd ~8 MB/frame at retina-720p × 60 Hz. Handing the buffer itself
-   to the data provider is faster and structurally race-free: the buffer
-   lives until the layer drops the image, which only happens when the next
-   commit hands a new buffer. State.fb.pixels is then a fresh allocation
-   that no one else has a pointer to. */
+   next frame. */
 static void commit_to_layer(void) {
     if (!state.fb.pixels || !state.ns_view) return;
 
@@ -828,11 +866,10 @@ static void commit_to_layer(void) {
         false,                             /* no interpolation */
         kCGRenderingIntentDefault);
 
-    /* Wrap the contents assignment in an explicit CATransaction with
-       implicit-actions disabled. Without this the assignment lands in the
-       implicit per-runloop transaction, which only commits when the
-       runloop iterates — but platform_run's tight while loop never enters
-       the runloop. */
+    /* Explicit CATransaction with implicit-actions disabled — assignment
+       commits to the compositor synchronously. The platform_run loop never
+       enters the runloop, so the implicit per-runloop transaction would
+       never fire on its own. */
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     state.ns_view.layer.contents = (__bridge id)img;
@@ -842,50 +879,28 @@ static void commit_to_layer(void) {
     CGDataProviderRelease(provider);
     CGColorSpaceRelease(cs);
 
-    /* Buffer ownership has transferred to the layer's data provider.
+    /* Buffer ownership transferred to the layer's data provider.
        Allocate a fresh one for the next frame at the pending size. */
     state.fb.width  = state.next_w;
     state.fb.height = state.next_h;
     state.fb.pixels = calloc((size_t)state.next_w * (size_t)state.next_h, sizeof(uint32_t));
 }
 
-/* Sync size, run frame_cb (which fills fb), then commit. Bypasses
-   AppKit's drawRect coalescing — Core Animation's main-thread transactions
-   commit during live-resize tracking-mode runloops, which is exactly when
-   we recurse into ourselves: AppKit calls our windowDidResize: delegate
-   from inside frame_cb's platform_poll_events (pump_events → sendEvent →
-   tracking-mode runloop → delegate → present_frame). The recursion is
-   intentional — without it nothing reaches the layer mid-drag and the
-   window stays empty for the duration of the resize. Each recursive
-   call is a real frame at a different size; frame_index/dt advance
-   accordingly, which is the correct accounting. The buffer-ownership
-   model means recursion can no longer free a buffer being written to. */
+/* sync size, drain queued events into event_cb, run frame_cb, commit.
+   Recurses cleanly via AppKit's tracking-mode runloop calling our
+   resize delegates → present_frame, which still drains queued events
+   (the resize was just queued) and presents at the new size. */
 static void present_frame(void) {
-    /* No active platform_run — either the caller is on the legacy polled
-       API path (no frame_cb to invoke) or platform_run already cleared
-       _libcg_active_desc in its cleanup tail and AppKit fired a late
-       delegate notification during [window close]. Nothing to drive, bail. */
-    if (!_libcg_active_desc) return;
+    if (!state.active_desc) return;
 
-    /* Apply any pending resize before frame_cb sees fb. */
     sync_fb_size();
+    drain_event_queue();
 
-    if (_libcg_active_desc->frame_cb) {
-        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-        platform_frame_t frame = {
-            .fb          = &state.fb,
-            .dt          = now - _libcg_run_t_prev,
-            .time        = now - _libcg_run_t0,
-            .frame_index = _libcg_run_frame_index++,
-        };
-        _libcg_active_desc->frame_cb(&frame, _libcg_active_desc->user_data);
-        _libcg_run_t_prev = now;
-    }
+    state.t_now = CFAbsoluteTimeGetCurrent();
+    state.active_desc->frame_cb(state.active_desc->user_data);
+    state.t_prev = state.t_now;
+    state.frame_count++;
 
-    /* frame_cb may flip state.running (platform_request_quit, or
-       windowWillClose during platform_poll_events). Skip the commit so we
-       don't push pixels to a window that's on its way out. The run-loop's
-       while-condition will exit on the next iteration. */
     if (state.running) commit_to_layer();
 }
 
@@ -895,54 +910,41 @@ int platform_run(const platform_app_desc_t *desc) {
         fprintf(stderr, "platform_run: invalid window size %dx%d\n", desc->width, desc->height);
         return -1;
     }
-    /* frame_cb is required: the run loop doesn't pump events itself in this
-       transitional design — frame_cb's call to platform_poll_events drives
-       AppKit. A null frame_cb would hang the app on the first iteration. */
     if (!desc->frame_cb) {
         fprintf(stderr, "platform_run: desc->frame_cb is required\n");
         return -1;
     }
 
-    const char *title = desc->title ? desc->title : "libcg";
-
-    /* TODO: desc->transparent, desc->resizable, desc->high_dpi are not yet
-       wired through; platform_init currently hardcodes transparent + resizable
-       + hi-dpi backing. Will plumb when callers actually need to opt out. */
-    if (!platform_init(desc->width, desc->height, title)) {
+    if (!platform_init(desc)) {
         fprintf(stderr, "platform_init failed\n");
         return -1;
     }
 
     if (desc->init_cb) desc->init_cb(desc->user_data);
 
-    _libcg_active_desc     = desc;
-    _libcg_run_t0          = CFAbsoluteTimeGetCurrent();
-    _libcg_run_t_prev      = _libcg_run_t0;
-    _libcg_run_frame_index = 0;
+    state.active_desc = desc;
+    state.t0          = CFAbsoluteTimeGetCurrent();
+    state.t_prev      = state.t0;
+    state.t_now       = state.t0;
+    state.frame_count = 0;
 
-    /* TRANSITIONAL: this loop doesn't pump OS events itself — the game's
-       frame_cb is expected to call platform_poll_events() (legacy polled
-       API, internally pumps NSApp). Adding pump_events() here would
-       double-pump because platform_poll_events resets per-frame transition
-       counts at its start, dropping any events the duplicate pump just
-       delivered. Real fix lands in PR 2.4 (event_cb wiring) which
-       restructures the pump path.
-
-       The @autoreleasepool guards against autoreleased Obj-C objects
-       frame_cb / present_frame might create (e.g. NSDate instances inside
-       AppKit during display) accumulating across frames. */
+    /* Per-iteration: pump AppKit events (handlers enqueue platform_event_t),
+       then present_frame drains the queue, calls frame_cb, commits. */
     while (state.running) {
         @autoreleasepool {
+            pump_events(state.ns_app);
+            if (!state.running) break;
             present_frame();
         }
     }
 
     if (desc->cleanup_cb) desc->cleanup_cb(desc->user_data);
 
-    _libcg_active_desc     = NULL;
-    _libcg_run_t0          = 0.0;
-    _libcg_run_t_prev      = 0.0;
-    _libcg_run_frame_index = 0;
+    state.active_desc = NULL;
+    state.t0          = 0.0;
+    state.t_prev      = 0.0;
+    state.t_now       = 0.0;
+    state.frame_count = 0;
 
     platform_shutdown();
     return 0;
