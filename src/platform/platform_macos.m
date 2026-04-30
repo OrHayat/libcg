@@ -757,10 +757,75 @@ uint32_t platform_get_window_display_id(void) {
     return num ? (uint32_t)[num unsignedIntValue] : 0;
 }
 
-/* --- New callback API (skeleton — implementation lands in PR 2.2) --- */
+/* --- New callback API --- */
+
+void platform_request_quit(void) {
+    state.running = false;
+}
 
 int platform_run(const platform_app_desc_t *desc) {
-    (void)desc;
-    fprintf(stderr, "platform_run: not implemented yet (skeleton)\n");
-    return -1;
+    if (!desc) return -1;
+    if (desc->width <= 0 || desc->height <= 0) {
+        fprintf(stderr, "platform_run: invalid window size %dx%d\n", desc->width, desc->height);
+        return -1;
+    }
+    /* frame_cb is required: the run loop doesn't pump events itself in this
+       transitional design — frame_cb's call to platform_poll_events drives
+       AppKit. A null frame_cb would hang the app on the first iteration. */
+    if (!desc->frame_cb) {
+        fprintf(stderr, "platform_run: desc->frame_cb is required\n");
+        return -1;
+    }
+
+    const char *title = desc->title ? desc->title : "libcg";
+
+    /* TODO: desc->transparent, desc->resizable, desc->high_dpi are not yet
+       wired through; platform_init currently hardcodes transparent + resizable
+       + hi-dpi backing. Will plumb when callers actually need to opt out. */
+    if (!platform_init(desc->width, desc->height, title)) {
+        fprintf(stderr, "platform_init failed\n");
+        return -1;
+    }
+
+    if (desc->init_cb) desc->init_cb(desc->user_data);
+
+    /* CFAbsoluteTime is a plain double — no autorelease, no allocation per
+       frame. Avoids the unbounded autoreleased-NSDate growth we'd get
+       running this hot loop without a per-iteration @autoreleasepool. */
+    CFAbsoluteTime t0     = CFAbsoluteTimeGetCurrent();
+    CFAbsoluteTime t_prev = t0;
+    uint64_t       frame_index = 0;
+
+    /* TRANSITIONAL: this loop doesn't pump OS events itself — the game's
+       frame_cb is expected to call platform_poll_events() (legacy polled
+       API, internally pumps NSApp). Adding pump_events() here would
+       double-pump because platform_poll_events resets per-frame transition
+       counts at its start, dropping any events the duplicate pump just
+       delivered. Real fix lands in PR 2.4 (event_cb wiring) which
+       restructures the pump path. The @autoreleasepool guards against any
+       autoreleased Obj-C objects frame_cb / present create accumulating. */
+    while (state.running) {
+        @autoreleasepool {
+            CFAbsoluteTime t_now = CFAbsoluteTimeGetCurrent();
+            platform_frame_t frame = {
+                .fb          = &state.fb.pub,
+                .dt          = t_now - t_prev,
+                .time        = t_now - t0,
+                .frame_index = frame_index++,
+            };
+
+            desc->frame_cb(&frame, desc->user_data);
+            /* frame_cb may flip state.running via platform_request_quit, or
+               windowWillClose may have fired during platform_poll_events.
+               Skip the present in either case so we don't blit to a window
+               that's already on its way out. */
+            if (!state.running) break;
+            platform_present();
+            t_prev = t_now;
+        }
+    }
+
+    if (desc->cleanup_cb) desc->cleanup_cb(desc->user_data);
+    platform_shutdown();
+    return 0;
 }
