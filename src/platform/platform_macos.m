@@ -920,13 +920,13 @@ int platform_run(const platform_app_desc_t *desc) {
     _libcg_run_t_prev      = _libcg_run_t0;
     _libcg_run_frame_index = 0;
 
-    /* TRANSITIONAL: this loop doesn't pump OS events itself — the game's
-       frame_cb is expected to call platform_poll_events() (legacy polled
-       API, internally pumps NSApp). Adding pump_events() here would
-       double-pump because platform_poll_events resets per-frame transition
-       counts at its start, dropping any events the duplicate pump just
-       delivered. Real fix lands in PR 2.4 (event_cb wiring) which
-       restructures the pump path.
+    /* This loop doesn't pump OS events itself — frame_cb is expected to
+       call platform_poll_events(), which internally pumps NSApp. Adding
+       a pump here would double-pump (platform_poll_events resets per-frame
+       transition counts at its start, so the duplicate's events would be
+       dropped). The longer-term fix is to retire the polled API and have
+       the platform pump events itself, dispatching to the user via an
+       event_cb that fires from inside this loop's iteration.
 
        The @autoreleasepool guards against autoreleased Obj-C objects
        frame_cb / present_frame might create (e.g. NSDate instances inside
