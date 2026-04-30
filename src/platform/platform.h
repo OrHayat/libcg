@@ -104,11 +104,20 @@ static inline bool platform_is_mouse_released(const platform_input_t *input, pla
 bool platform_init(int width, int height, const char *title);
 void platform_shutdown(void);
 
-/* Per-frame */
+/* Per-frame. Polled-API contract:
+   - platform_present() hands the framebuffer to the OS compositor and
+     allocates a fresh one for the next frame. The fb->pixels pointer is
+     not stable across present calls — re-fetch each iteration, do not
+     cache.
+   - The fresh buffer is zero-initialized. Whatever you wrote last frame
+     is gone; render the full frame each iteration (or maintain your own
+     persistent buffer separate from the platform fb). */
 void platform_poll_events(platform_input_t *input);
 void platform_present(void);
 
-/* Accessors */
+/* Accessors. The returned struct pointer is stable, but its `pixels`
+   field changes each platform_present(). Re-read pixels through the
+   struct on every use. */
 platform_framebuffer_t *platform_get_framebuffer(void);
 
 /* Window controls */
@@ -259,7 +268,11 @@ typedef struct {
 } platform_event_t;
 
 typedef struct {
-    platform_framebuffer_t *fb;        /* writable backing buffer */
+    /* Writable backing buffer. fb->pixels is valid for the duration of
+       this frame_cb call only — do not cache the pointer past the call.
+       The platform hands ownership of the buffer to the OS compositor on
+       commit and allocates a fresh one for the next frame. */
+    platform_framebuffer_t *fb;
     double                  dt;        /* seconds since last frame */
     double                  time;      /* seconds since app start */
     uint64_t                frame_index;
