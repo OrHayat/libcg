@@ -380,9 +380,26 @@ static NSSize get_backing_size(NSWindow *window) {
 // it at a differently-sized allocation.
 static void reallocate_framebuffer(void) {
     NSSize backing = get_backing_size(state.ns_window);
+    int new_w = (int)backing.width;
+    int new_h = (int)backing.height;
+
+    /* No-op when size hasn't actually changed. windowDidChangeScreen fires
+       on every screen crossing including same-scale moves where the backing
+       pixel size is identical — reallocating there throws away current
+       pixels for a freshly-calloc'd transparent buffer, which produces a
+       one-compositor-frame transparent flash on startup as the window
+       settles on its final screen. */
+    if (state.fb.pub.pixels && new_w == state.fb.pub.width && new_h == state.fb.pub.height) {
+        return;
+    }
+
     destroy_framebuffer(&state.fb);
-    state.fb = create_framebuffer((int)backing.width, (int)backing.height);
-    [state.ns_view setNeedsDisplay:YES];
+    state.fb = create_framebuffer(new_w, new_h);
+    /* No setNeedsDisplay:YES — the platform_run path commits explicitly via
+       present_frame() right after this returns; the legacy polled-API path
+       commits via the user's next platform_present(). A queued drawRect
+       could race and commit the freshly-zeroed buffer to layer.contents
+       before either of those. */
 }
 
 static NSApplication *create_application(void) {
