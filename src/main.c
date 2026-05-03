@@ -6,6 +6,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* ============================================================
+   App state — passed as desc.user_data, threaded through every
+   callback. Lives in main()'s stack frame; main() blocks on
+   platform_run so the pointer is valid for the whole app lifetime.
+   No file-scope mutable globals.
+   ============================================================ */
+
 typedef enum {
     PATTERN_SOLID = 0,
     PATTERN_GRADIENT,
@@ -14,7 +21,39 @@ typedef enum {
     PATTERN_CUSTOM_COLOR,
 } pattern_t;
 
-static u32 s_custom_color = 0xFFFF8800;  /* default orange, 0xAARRGGBB unpremultiplied */
+typedef enum {
+    MODE_PATTERN,
+    MODE_PAINT,
+} app_mode_t;
+
+typedef struct {
+    /* main mode */
+    app_mode_t mode;
+
+    /* color-input overlay — orthogonal to main mode; renders below */
+    bool color_input_active;
+    char color_input_buf[16];
+    int  color_input_len;
+
+    /* pattern mode state (persists when switching to paint and back) */
+    pattern_t pattern;
+    u32       custom_color;          /* 0xAARRGGBB unpremultiplied */
+    bool      bg_checkerboard;
+
+    /* debug toggles */
+    bool print_mouse_coords;
+
+    /* mouse position tracked from PLATFORM_EV_MOUSE_MOVE */
+    int mouse_x, mouse_y;
+
+    /* paint mode — fixed-size canvas that survives window resizes */
+    u32 *paint_canvas;
+    int  paint_canvas_w, paint_canvas_h;
+} app_state_t;
+
+/* ============================================================
+   Pure helpers — no state.
+   ============================================================ */
 
 static int hex_digit(char c) {
     if (c >= '0' && c <= '9') return c - '0';
@@ -79,6 +118,19 @@ static u32 alpha_blend(u32 dst, u32 src) {
     return ((u32)a << 24) | ((u32)r << 16) | ((u32)g << 8) | (u32)b;
 }
 
+static const char *mouse_button_name(platform_mouse_button_t b) {
+    switch (b) {
+    case PLATFORM_MOUSE_LEFT:   return "left";
+    case PLATFORM_MOUSE_RIGHT:  return "right";
+    case PLATFORM_MOUSE_MIDDLE: return "middle";
+    default:                    return "?";
+    }
+}
+
+/* ============================================================
+   Render helpers — take fb (and any extra args), no app state.
+   ============================================================ */
+
 static void render_custom_color(platform_framebuffer_t *fb, u32 argb) {
     u32 src = premultiply(argb);
     int n = fb->width * fb->height;
@@ -126,26 +178,21 @@ static void render_checkerboard(platform_framebuffer_t *fb) {
     }
 }
 
-/* Paint canvas — fixed-size pixel buffer that survives window resizes.
-   Window is just a viewport onto it; resize never touches these pixels. */
-static u32 *paint_canvas   = NULL;
-static int  paint_canvas_w = 0;
-static int  paint_canvas_h = 0;
-
 /* Letterbox the canvas inside the framebuffer (Photoshop / MS Paint model).
    Window > canvas → gray bars; window < canvas → canvas pixels are clipped
    from view but remain in memory. No interpolation, ever. */
-static void render_paint_mode(platform_framebuffer_t *fb) {
+static void render_paint_mode(platform_framebuffer_t *fb,
+                              const u32 *canvas, int canvas_w, int canvas_h) {
     framebuffer_clear(fb, RGB(48, 48, 48));
-    if (!paint_canvas) return;
+    if (!canvas) return;
 
-    int off_x = (fb->width  - paint_canvas_w) / 2;
-    int off_y = (fb->height - paint_canvas_h) / 2;
+    int off_x = (fb->width  - canvas_w) / 2;
+    int off_y = (fb->height - canvas_h) / 2;
 
     int dst_x0 = off_x < 0 ? 0 : off_x;
     int dst_y0 = off_y < 0 ? 0 : off_y;
-    int dst_x1 = off_x + paint_canvas_w;
-    int dst_y1 = off_y + paint_canvas_h;
+    int dst_x1 = off_x + canvas_w;
+    int dst_y1 = off_y + canvas_h;
     if (dst_x1 > fb->width)  dst_x1 = fb->width;
     if (dst_y1 > fb->height) dst_y1 = fb->height;
     if (dst_x0 >= dst_x1 || dst_y0 >= dst_y1) return;
@@ -154,18 +201,18 @@ static void render_paint_mode(platform_framebuffer_t *fb) {
     size_t row_bytes = (size_t)(dst_x1 - dst_x0) * sizeof(u32);
     for (int y = dst_y0; y < dst_y1; y++) {
         memcpy(&fb->pixels[y * fb->width + dst_x0],
-               &paint_canvas[(y - off_y) * paint_canvas_w + src_x],
+               &canvas[(y - off_y) * canvas_w + src_x],
                row_bytes);
     }
 
     /* 1px black border around the canvas. Horizontal strips run from the
        LEFT outer column (off_x - 1) through the RIGHT outer column
-       (off_x + paint_canvas_w) so the corners get covered — without that,
+       (off_x + canvas_w) so the corners get covered — without that,
        the four corner pixels stay gray and the border looks chipped. */
     int top   = off_y - 1;
-    int bot   = off_y + paint_canvas_h;
+    int bot   = off_y + canvas_h;
     int left  = off_x - 1;
-    int right = off_x + paint_canvas_w;
+    int right = off_x + canvas_w;
 
     int hx0 = left  < 0           ? 0           : left;
     int hx1 = right >= fb->width  ? fb->width-1 : right;   /* inclusive */
@@ -189,6 +236,11 @@ static void render_paint_mode(platform_framebuffer_t *fb) {
             fb->pixels[y * fb->width + right] = RGB(0, 0, 0);
     }
 }
+
+/* ============================================================
+   Display-info pretty-printers — read platform accessors directly,
+   no app state.
+   ============================================================ */
 
 static const char *connection_type_str(platform_connection_type_t t) {
     switch (t) {
@@ -242,7 +294,6 @@ static void print_window_display_modes(void) {
         int rate = (int)(modes[i].refresh_hz + 0.5f);
         if (rate < 60) continue;  /* drop 24/30/48/50/etc — video cadences */
 
-        /* find or add group keyed on pixel resolution */
         int gi = -1;
         for (int j = 0; j < gc; j++) {
             if (groups[j].pw == modes[i].pixels_w && groups[j].ph == modes[i].pixels_h) {
@@ -258,7 +309,6 @@ static void print_window_display_modes(void) {
         }
         if (gi < 0) continue;
 
-        /* insert rate sorted desc, dedup */
         group_t *g = &groups[gi];
         bool seen = false;
         for (int r = 0; r < g->rate_count; r++) {
@@ -276,7 +326,6 @@ static void print_window_display_modes(void) {
         }
     }
 
-    /* sort groups by pixel area ascending */
     for (int i = 1; i < gc; i++) {
         group_t tmp = groups[i];
         int j = i;
@@ -317,191 +366,258 @@ static void print_displays_with_framebuffer(void) {
 }
 
 /* ============================================================
-   App state. File-scope statics for now; PR after this lifts them
-   into a proper game_state_t struct stuffed into desc->user_data.
+   Color-input overlay. Active independently of the main mode;
+   text input goes here, the main mode renders below.
    ============================================================ */
 
-static bool      print_mouse_coords = false;
-static bool      bg_checkerboard    = false;
-static bool      paint_mode         = false;
-static pattern_t pattern            = PATTERN_SOLID;
-static bool      color_input_mode   = false;
-static char      color_input_buf[16] = {0};
-static int       color_input_len    = 0;
-static int       cur_mx = 0, cur_my = 0;       /* tracked from MOUSE_MOVE */
-
-static const char *mouse_button_name(platform_mouse_button_t b) {
-    switch (b) {
-    case PLATFORM_MOUSE_LEFT:   return "left";
-    case PLATFORM_MOUSE_RIGHT:  return "right";
-    case PLATFORM_MOUSE_MIDDLE: return "middle";
-    default:                    return "?";
-    }
+static void color_input_enter(app_state_t *app) {
+    app->color_input_active = true;
+    app->color_input_len    = 0;
+    app->color_input_buf[0] = '\0';
+    printf("color input mode (type hex digits, Enter to apply, Esc to cancel)\n");
+    printf("color input: #");
+    fflush(stdout);
 }
 
-static void on_init(void *ud) {
-    (void)ud;
-    /* Allocate paint canvas at startup framebuffer size (retina-aware).
-       Survives all window resizes; window is just a viewport onto it. */
-    platform_framebuffer_t *fb0 = platform_get_framebuffer();
-    paint_canvas_w = fb0->width;
-    paint_canvas_h = fb0->height;
-
-    size_t pixel_count = (size_t)paint_canvas_w * (size_t)paint_canvas_h;
-    paint_canvas = malloc(pixel_count * sizeof(u32));
-    if (paint_canvas) {
-        for (size_t i = 0; i < pixel_count; i++) paint_canvas[i] = 0xFFFFFFFFu;
-    }
+static void color_input_exit(app_state_t *app) {
+    app->color_input_active = false;
+    app->color_input_len    = 0;
+    app->color_input_buf[0] = '\0';
 }
 
-static void on_cleanup(void *ud) {
-    (void)ud;
-    free(paint_canvas);
-    paint_canvas = NULL;
-}
-
-static void on_event(const platform_event_t *e, void *ud) {
-    (void)ud;
-
+static void color_input_on_event(app_state_t *app, const platform_event_t *e) {
     switch (e->kind) {
-    case PLATFORM_EV_KEY_DOWN: {
-        platform_key_t k = e->key.key;
-
-        /* Color-input mode handles a few keys specially; pass through to
-           the normal switch for non-handled ones (none today, but keeps
-           the mode-switch boundary readable). */
-        if (color_input_mode) {
-            if (k == PLATFORM_KEY_BACKSPACE && color_input_len > 0) {
-                color_input_buf[--color_input_len] = '\0';
-                printf("\r\x1b[Kcolor input: #%s", color_input_buf);
-                fflush(stdout);
-            } else if (k == PLATFORM_KEY_ENTER && !e->key.repeat) {
-                u32 parsed;
-                if (parse_hex_color(color_input_buf, color_input_len, &parsed)) {
-                    s_custom_color = parsed;
-                    pattern = PATTERN_CUSTOM_COLOR;
-                    printf("\ncolor applied: #%s -> 0x%08X\n", color_input_buf, parsed);
-                } else {
-                    printf("\r\x1b[K#%s is not valid format\n", color_input_buf);
-                }
-                color_input_mode = false;
-                color_input_len  = 0;
-                color_input_buf[0] = '\0';
-            } else if (k == PLATFORM_KEY_ESCAPE && !e->key.repeat) {
-                printf("\ncolor input cancelled\n");
-                color_input_mode = false;
-                color_input_len  = 0;
-                color_input_buf[0] = '\0';
+    case PLATFORM_EV_KEY_DOWN:
+        if (e->key.key == PLATFORM_KEY_BACKSPACE && app->color_input_len > 0) {
+            app->color_input_buf[--app->color_input_len] = '\0';
+            printf("\r\x1b[Kcolor input: #%s", app->color_input_buf);
+            fflush(stdout);
+        } else if (e->key.key == PLATFORM_KEY_ENTER && !e->key.repeat) {
+            u32 parsed;
+            if (parse_hex_color(app->color_input_buf, app->color_input_len, &parsed)) {
+                app->custom_color = parsed;
+                app->pattern      = PATTERN_CUSTOM_COLOR;
+                printf("\ncolor applied: #%s -> 0x%08X\n", app->color_input_buf, parsed);
+            } else {
+                printf("\r\x1b[K#%s is not valid format\n", app->color_input_buf);
             }
-            return;
+            color_input_exit(app);
+        } else if (e->key.key == PLATFORM_KEY_ESCAPE && !e->key.repeat) {
+            printf("\ncolor input cancelled\n");
+            color_input_exit(app);
         }
-
-        /* Repeating presses ignored for everything below. */
-        if (e->key.repeat) return;
-
-        switch (k) {
-        case PLATFORM_KEY_Q:      platform_request_quit(); break;
-        case PLATFORM_KEY_M:
-            print_mouse_coords = !print_mouse_coords;
-            printf("mouse coord printing: %s\n", print_mouse_coords ? "ON" : "OFF");
-            break;
-        case PLATFORM_KEY_F:      platform_toggle_fullscreen(); break;
-        case PLATFORM_KEY_ESCAPE:
-            if (platform_is_fullscreen()) platform_toggle_fullscreen();
-            break;
-        case PLATFORM_KEY_1: pattern = PATTERN_SOLID; break;
-        case PLATFORM_KEY_2: pattern = PATTERN_GRADIENT; break;
-        case PLATFORM_KEY_3: pattern = PATTERN_CYCLE; break;
-        case PLATFORM_KEY_4: pattern = PATTERN_NOISE; break;
-        case PLATFORM_KEY_B:
-            bg_checkerboard = !bg_checkerboard;
-            printf("background: %s\n", bg_checkerboard ? "checkerboard" : "transparent");
-            break;
-        case PLATFORM_KEY_T: print_displays_with_framebuffer(); break;
-        case PLATFORM_KEY_L: print_window_display_modes(); break;
-        case PLATFORM_KEY_P:
-            paint_mode = !paint_mode;
-            printf("mode: %s\n", paint_mode ? "paint" : "pattern");
-            break;
-        default: break;
-        }
-    } break;
-
+        break;
     case PLATFORM_EV_TEXT_INPUT: {
         char c = e->text.ch[0];
-        if (!color_input_mode && c == '#') {
-            color_input_mode = true;
-            color_input_len  = 0;
-            color_input_buf[0] = '\0';
-            printf("color input mode (type hex digits, Enter to apply, Esc to cancel)\n");
-            printf("color input: #");
-            fflush(stdout);
-        } else if (color_input_mode && c != '#' && hex_digit(c) >= 0 && color_input_len < 8) {
-            color_input_buf[color_input_len++] = c;
-            color_input_buf[color_input_len]   = '\0';
-            printf("\r\x1b[Kcolor input: #%s", color_input_buf);
+        if (c != '#' && hex_digit(c) >= 0 && app->color_input_len < 8) {
+            app->color_input_buf[app->color_input_len++] = c;
+            app->color_input_buf[app->color_input_len]   = '\0';
+            printf("\r\x1b[Kcolor input: #%s", app->color_input_buf);
             fflush(stdout);
         }
     } break;
-
-    case PLATFORM_EV_MOUSE_MOVE:
-        cur_mx = e->move.x;
-        cur_my = e->move.y;
-        if (!color_input_mode && print_mouse_coords) {
-            printf("mouse: (%d, %d)\n", cur_mx, cur_my);
-        }
-        break;
-
-    case PLATFORM_EV_MOUSE_DOWN:
-        if (!color_input_mode)
-            printf("mouse %s pressed at (%d, %d)\n",
-                   mouse_button_name(e->mouse.btn), e->mouse.x, e->mouse.y);
-        break;
-
-    case PLATFORM_EV_MOUSE_UP:
-        if (!color_input_mode)
-            printf("mouse %s released at (%d, %d)\n",
-                   mouse_button_name(e->mouse.btn), e->mouse.x, e->mouse.y);
-        break;
-
-    case PLATFORM_EV_SCROLL:
-        if (!color_input_mode && (e->scroll.dx != 0.0f || e->scroll.dy != 0.0f))
-            printf("scroll: dx=%.1f dy=%.1f\n",
-                   (double)e->scroll.dx, (double)e->scroll.dy);
-        break;
-
     default:
         break;
     }
 }
 
-static void on_frame(void *ud) {
-    (void)ud;
-    platform_framebuffer_t *fb = platform_get_framebuffer();
+/* ============================================================
+   Pattern mode.
+   ============================================================ */
 
-    if (paint_mode) {
-        render_paint_mode(fb);
+static void pattern_on_event(app_state_t *app, const platform_event_t *e) {
+    switch (e->kind) {
+    case PLATFORM_EV_KEY_DOWN:
+        if (e->key.repeat) break;
+        switch (e->key.key) {
+        case PLATFORM_KEY_M:
+            app->print_mouse_coords = !app->print_mouse_coords;
+            printf("mouse coord printing: %s\n", app->print_mouse_coords ? "ON" : "OFF");
+            break;
+        case PLATFORM_KEY_1: app->pattern = PATTERN_SOLID;    break;
+        case PLATFORM_KEY_2: app->pattern = PATTERN_GRADIENT; break;
+        case PLATFORM_KEY_3: app->pattern = PATTERN_CYCLE;    break;
+        case PLATFORM_KEY_4: app->pattern = PATTERN_NOISE;    break;
+        case PLATFORM_KEY_B:
+            app->bg_checkerboard = !app->bg_checkerboard;
+            printf("background: %s\n", app->bg_checkerboard ? "checkerboard" : "transparent");
+            break;
+        case PLATFORM_KEY_T: print_displays_with_framebuffer(); break;
+        case PLATFORM_KEY_L: print_window_display_modes();      break;
+        case PLATFORM_KEY_P:
+            app->mode = MODE_PAINT;
+            printf("mode: paint\n");
+            break;
+        default: break;
+        }
+        break;
+    case PLATFORM_EV_MOUSE_DOWN:
+        printf("mouse %s pressed at (%d, %d)\n",
+               mouse_button_name(e->mouse.btn), e->mouse.x, e->mouse.y);
+        break;
+    case PLATFORM_EV_MOUSE_UP:
+        printf("mouse %s released at (%d, %d)\n",
+               mouse_button_name(e->mouse.btn), e->mouse.x, e->mouse.y);
+        break;
+    case PLATFORM_EV_SCROLL:
+        if (e->scroll.dx != 0.0f || e->scroll.dy != 0.0f)
+            printf("scroll: dx=%.1f dy=%.1f\n",
+                   (double)e->scroll.dx, (double)e->scroll.dy);
+        break;
+    default:
+        break;
+    }
+}
+
+static void pattern_on_frame(app_state_t *app, platform_framebuffer_t *fb) {
+    /* Background first — either checker or fully transparent.
+       Required so alpha-blended patterns (CUSTOM_COLOR) have a correct
+       base and don't pick up last frame's pixels. */
+    if (app->bg_checkerboard) render_checkerboard(fb);
+    else                      framebuffer_clear(fb, 0x00000000);
+
+    switch (app->pattern) {
+    case PATTERN_SOLID:        render_solid(fb);                          break;
+    case PATTERN_GRADIENT:     render_gradient(fb);                       break;
+    case PATTERN_CYCLE:        render_cycle(fb, platform_now() * 3.0);    break;
+    case PATTERN_NOISE:        render_noise(fb);                          break;
+    case PATTERN_CUSTOM_COLOR: render_custom_color(fb, app->custom_color); break;
+    }
+}
+
+/* ============================================================
+   Paint mode.
+   ============================================================ */
+
+static void paint_on_event(app_state_t *app, const platform_event_t *e) {
+    switch (e->kind) {
+    case PLATFORM_EV_KEY_DOWN:
+        if (e->key.repeat) break;
+        switch (e->key.key) {
+        case PLATFORM_KEY_M:
+            app->print_mouse_coords = !app->print_mouse_coords;
+            printf("mouse coord printing: %s\n", app->print_mouse_coords ? "ON" : "OFF");
+            break;
+        case PLATFORM_KEY_T: print_displays_with_framebuffer(); break;
+        case PLATFORM_KEY_L: print_window_display_modes();      break;
+        case PLATFORM_KEY_P:
+            app->mode = MODE_PATTERN;
+            printf("mode: pattern\n");
+            break;
+        default: break;
+        }
+        break;
+    case PLATFORM_EV_MOUSE_DOWN:
+        printf("mouse %s pressed at (%d, %d)\n",
+               mouse_button_name(e->mouse.btn), e->mouse.x, e->mouse.y);
+        break;
+    case PLATFORM_EV_MOUSE_UP:
+        printf("mouse %s released at (%d, %d)\n",
+               mouse_button_name(e->mouse.btn), e->mouse.x, e->mouse.y);
+        break;
+    default:
+        break;
+    }
+}
+
+static void paint_on_frame(app_state_t *app, platform_framebuffer_t *fb) {
+    render_paint_mode(fb, app->paint_canvas, app->paint_canvas_w, app->paint_canvas_h);
+}
+
+/* ============================================================
+   Top-level callbacks. Dispatch to mode-specific handlers.
+   ============================================================ */
+
+/* Hotkeys that bypass mode and overlay — Q quits, F toggles fullscreen,
+   Esc exits fullscreen. Returns true if handled (caller should stop). */
+static bool handle_global_hotkey(const platform_event_t *e) {
+    if (e->kind != PLATFORM_EV_KEY_DOWN || e->key.repeat) return false;
+    switch (e->key.key) {
+    case PLATFORM_KEY_Q: platform_request_quit();      return true;
+    case PLATFORM_KEY_F: platform_toggle_fullscreen(); return true;
+    case PLATFORM_KEY_ESCAPE:
+        if (platform_is_fullscreen()) { platform_toggle_fullscreen(); return true; }
+        return false;
+    default:
+        return false;
+    }
+}
+
+static void on_init(void *ud) {
+    app_state_t *app = ud;
+
+    /* Allocate paint canvas at startup framebuffer size (retina-aware).
+       Survives all window resizes; window is just a viewport onto it. */
+    platform_framebuffer_t *fb0 = platform_get_framebuffer();
+    app->paint_canvas_w = fb0->width;
+    app->paint_canvas_h = fb0->height;
+
+    size_t pixel_count = (size_t)app->paint_canvas_w * (size_t)app->paint_canvas_h;
+    app->paint_canvas = malloc(pixel_count * sizeof(u32));
+    if (app->paint_canvas) {
+        for (size_t i = 0; i < pixel_count; i++) app->paint_canvas[i] = 0xFFFFFFFFu;
+    }
+}
+
+static void on_cleanup(void *ud) {
+    app_state_t *app = ud;
+    free(app->paint_canvas);
+    app->paint_canvas = NULL;
+}
+
+static void on_event(const platform_event_t *e, void *ud) {
+    app_state_t *app = ud;
+
+    /* Mouse position tracking happens regardless of mode/overlay. */
+    if (e->kind == PLATFORM_EV_MOUSE_MOVE) {
+        app->mouse_x = e->move.x;
+        app->mouse_y = e->move.y;
+        if (!app->color_input_active && app->print_mouse_coords)
+            printf("mouse: (%d, %d)\n", app->mouse_x, app->mouse_y);
         return;
     }
 
-    /* Background first — either checker or fully transparent.
-       Required so alpha-blended patterns (CUSTOM_COLOR) have a
-       correct base and don't pick up last frame's pixels. */
-    if (bg_checkerboard) {
-        render_checkerboard(fb);
-    } else {
-        framebuffer_clear(fb, 0x00000000);
+    if (handle_global_hotkey(e)) return;
+
+    /* Color-input overlay: text input goes to the buffer; the mode below
+       still renders. While active, mouse + non-Esc/Enter/Backspace keys
+       are ignored (matches the original behavior). */
+    if (app->color_input_active) {
+        color_input_on_event(app, e);
+        return;
     }
-    switch (pattern) {
-        case PATTERN_SOLID:        render_solid(fb); break;
-        case PATTERN_GRADIENT:     render_gradient(fb); break;
-        case PATTERN_CYCLE:        render_cycle(fb, platform_now() * 3.0); break;
-        case PATTERN_NOISE:        render_noise(fb); break;
-        case PATTERN_CUSTOM_COLOR: render_custom_color(fb, s_custom_color); break;
+    if (e->kind == PLATFORM_EV_TEXT_INPUT && e->text.ch[0] == '#') {
+        color_input_enter(app);
+        return;
+    }
+
+    switch (app->mode) {
+    case MODE_PATTERN: pattern_on_event(app, e); break;
+    case MODE_PAINT:   paint_on_event(app, e);   break;
+    }
+}
+
+static void on_frame(void *ud) {
+    app_state_t *app = ud;
+    platform_framebuffer_t *fb = platform_get_framebuffer();
+    /* color-input overlay has no frame of its own — main mode renders below. */
+    switch (app->mode) {
+    case MODE_PATTERN: pattern_on_frame(app, fb); break;
+    case MODE_PAINT:   paint_on_frame(app, fb);   break;
     }
 }
 
 int main(void) {
+    app_state_t app = {
+        .mode               = MODE_PATTERN,
+        .pattern            = PATTERN_SOLID,
+        .custom_color       = 0xFFFF8800,           /* default orange */
+        .bg_checkerboard    = false,
+        .print_mouse_coords = false,
+        .color_input_active = false,
+        /* paint_canvas allocated in on_init from current backing size */
+    };
+
     return platform_run(&(platform_app_desc_t){
         .width       = 1280,
         .height      = 720,
@@ -509,6 +625,7 @@ int main(void) {
         .transparent = true,
         .resizable   = true,
         .high_dpi    = true,
+        .user_data   = &app,
         .init_cb     = on_init,
         .frame_cb    = on_frame,
         .event_cb    = on_event,
