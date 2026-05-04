@@ -558,6 +558,11 @@ uint64_t platform_frame_count(void) {
     return state.frame_count;
 }
 
+double platform_get_dpi_scale(void) {
+    if (!state.active_desc || !state.active_desc->high_dpi) return 1.0;
+    return state.ns_window ? (double)[state.ns_window backingScaleFactor] : 1.0;
+}
+
 void platform_toggle_fullscreen(void) {
     [state.ns_window toggleFullScreen:nil];
 }
