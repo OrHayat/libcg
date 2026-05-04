@@ -474,19 +474,27 @@ static void activate_app(NSApplication *app) {
     }
 }
 
-// Drain any pending AppKit events. distantPast = non-blocking poll. The
-// NSResponder methods on LibcgView and NSWindowDelegate methods on
-// AppDelegate (called via [NSApp sendEvent:] / notifications) push
-// platform_event_t entries into our event queue.
+// Drain any pending AppKit events. distantPast = non-blocking poll.
+// Polls both NSDefaultRunLoopMode (regular events) and
+// NSEventTrackingRunLoopMode (mouse-drag events: between mouseDown and
+// mouseUp, AppKit queues mouseDragged: events in tracking mode just
+// like it does for live-resize). Without the second pass, drag events
+// pile up invisibly until mouseUp returns control to default mode and
+// the app sees a click without the strokes between.
+static void pump_events_in_mode(NSApplication *app, NSString *mode) {
+    NSEvent *event;
+    while ((event = [app nextEventMatchingMask:NSEventMaskAny
+                                     untilDate:[NSDate distantPast]
+                                        inMode:mode
+                                       dequeue:YES])) {
+        [app sendEvent:event];
+    }
+}
+
 static void pump_events(NSApplication *app) {
     @autoreleasepool {
-        NSEvent *event;
-        while ((event = [app nextEventMatchingMask:NSEventMaskAny
-                                         untilDate:[NSDate distantPast]
-                                            inMode:NSDefaultRunLoopMode
-                                           dequeue:YES])) {
-            [app sendEvent:event];
-        }
+        pump_events_in_mode(app, NSDefaultRunLoopMode);
+        pump_events_in_mode(app, NSEventTrackingRunLoopMode);
     }
 }
 
@@ -556,6 +564,11 @@ double platform_dt(void) {
 
 uint64_t platform_frame_count(void) {
     return state.frame_count;
+}
+
+double platform_get_dpi_scale(void) {
+    if (!state.active_desc || !state.active_desc->high_dpi) return 1.0;
+    return state.ns_window ? (double)[state.ns_window backingScaleFactor] : 1.0;
 }
 
 void platform_toggle_fullscreen(void) {

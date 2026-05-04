@@ -26,6 +26,12 @@ typedef enum {
     MODE_PAINT,
 } app_mode_t;
 
+typedef enum {
+    TOOL_PENCIL = 0,    /* 1px dot at cursor, current color */
+    TOOL_BRUSH,         /* brush_size × brush_size square, current color */
+    TOOL_ERASER,        /* brush_size × brush_size square, white */
+} paint_tool_t;
+
 typedef struct {
     /* main mode */
     app_mode_t mode;
@@ -49,6 +55,13 @@ typedef struct {
     /* paint mode — fixed-size canvas that survives window resizes */
     u32 *paint_canvas;
     int  paint_canvas_w, paint_canvas_h;
+
+    /* paint tool state */
+    paint_tool_t paint_tool;          /* current tool, default TOOL_PENCIL */
+    int          brush_size;          /* size for brush/eraser, 1..32, default 5 */
+    bool         painting;            /* mouse held during a stroke */
+    int          last_paint_cx;       /* prev stroke point in canvas coords */
+    int          last_paint_cy;
 } app_state_t;
 
 /* ============================================================
@@ -486,8 +499,109 @@ static void pattern_on_frame(app_state_t *app, platform_framebuffer_t *fb) {
 }
 
 /* ============================================================
-   Paint mode.
+   Paint mode — pencil / brush / eraser, brush sizing, clear canvas.
+   Mouse coords from events are in logical points; canvas is in
+   framebuffer pixels. Conversion: multiply by platform_get_dpi_scale()
+   to get fb-pixel coords, then subtract the letterbox offset that
+   render_paint_mode applies. Invariant: render_paint_mode and
+   mouse_to_canvas use the same offset formula so cursor lines up
+   exactly with painted pixels.
    ============================================================ */
+
+static const char *tool_name(paint_tool_t t) {
+    switch (t) {
+    case TOOL_PENCIL: return "pencil";
+    case TOOL_BRUSH:  return "brush";
+    case TOOL_ERASER: return "eraser";
+    default:          return "?";
+    }
+}
+
+/* Convert logical-point mouse coords to canvas-pixel coords.
+   Returns false if the cursor is outside the canvas (in the gray
+   letterbox bars). */
+static bool mouse_to_canvas(app_state_t *app, int mouse_x, int mouse_y,
+                            int *out_cx, int *out_cy) {
+    platform_framebuffer_t *fb = platform_get_framebuffer();
+    double scale = platform_get_dpi_scale();
+    int fb_x = (int)(mouse_x * scale);
+    int fb_y = (int)(mouse_y * scale);
+
+    int off_x = (fb->width  - app->paint_canvas_w) / 2;
+    int off_y = (fb->height - app->paint_canvas_h) / 2;
+    int cx = fb_x - off_x;
+    int cy = fb_y - off_y;
+
+    if (cx < 0 || cx >= app->paint_canvas_w) return false;
+    if (cy < 0 || cy >= app->paint_canvas_h) return false;
+    *out_cx = cx;
+    *out_cy = cy;
+    return true;
+}
+
+/* Apply current tool centered at canvas-pixel (cx, cy). Out-of-bounds
+   pixels in the brush footprint are clipped, not wrapped. */
+static void apply_tool_at(app_state_t *app, int cx, int cy) {
+    u32 color;
+    int radius;
+    switch (app->paint_tool) {
+    case TOOL_PENCIL: color = app->custom_color; radius = 0;                       break;
+    case TOOL_BRUSH:  color = app->custom_color; radius = app->brush_size / 2;     break;
+    case TOOL_ERASER: color = 0xFFFFFFFFu;       radius = app->brush_size / 2;     break;
+    default: return;
+    }
+
+    int x0 = cx - radius, x1 = cx + radius;
+    int y0 = cy - radius, y1 = cy + radius;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= app->paint_canvas_w) x1 = app->paint_canvas_w - 1;
+    if (y1 >= app->paint_canvas_h) y1 = app->paint_canvas_h - 1;
+
+    for (int y = y0; y <= y1; y++) {
+        u32 *row = &app->paint_canvas[y * app->paint_canvas_w];
+        for (int x = x0; x <= x1; x++) row[x] = color;
+    }
+}
+
+/* Bresenham line — fills pixel gaps when the mouse moves faster than
+   one event per pixel. Without this, fast strokes leave a string of
+   dots instead of a continuous line. */
+static void apply_tool_stroke(app_state_t *app, int x0, int y0, int x1, int y1) {
+    int dx =  abs(x1 - x0);
+    int dy = -abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1;
+    int sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy;
+    for (;;) {
+        apply_tool_at(app, x0, y0);
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 >= dy) { err += dy; x0 += sx; }
+        if (e2 <= dx) { err += dx; y0 += sy; }
+    }
+}
+
+static void paint_canvas_clear(app_state_t *app) {
+    if (!app->paint_canvas) return;
+    size_t n = (size_t)app->paint_canvas_w * (size_t)app->paint_canvas_h;
+    for (size_t i = 0; i < n; i++) app->paint_canvas[i] = 0xFFFFFFFFu;
+    printf("canvas cleared\n");
+}
+
+static void paint_set_tool(app_state_t *app, paint_tool_t t) {
+    app->paint_tool = t;
+    if (t == TOOL_PENCIL) printf("tool: pencil\n");
+    else                  printf("tool: %s (size %d)\n", tool_name(t), app->brush_size);
+}
+
+static void paint_set_brush_size(app_state_t *app, int size) {
+    if (size < 1)  size = 1;
+    if (size > 32) size = 32;
+    app->brush_size = size;
+    if (app->paint_tool == TOOL_BRUSH || app->paint_tool == TOOL_ERASER)
+        printf("brush size: %d\n", app->brush_size);
+}
 
 static void paint_on_event(app_state_t *app, const platform_event_t *e) {
     switch (e->kind) {
@@ -504,17 +618,56 @@ static void paint_on_event(app_state_t *app, const platform_event_t *e) {
             app->mode = MODE_PATTERN;
             printf("mode: pattern\n");
             break;
+
+        /* Tool selection — positional, room to grow as more tools land. */
+        case PLATFORM_KEY_1: paint_set_tool(app, TOOL_PENCIL); break;
+        case PLATFORM_KEY_2: paint_set_tool(app, TOOL_BRUSH);  break;
+        case PLATFORM_KEY_3: paint_set_tool(app, TOOL_ERASER); break;
+
+        /* Brush size: ±1 step. */
+        case PLATFORM_KEY_LEFT_BRACKET:  paint_set_brush_size(app, app->brush_size - 1); break;
+        case PLATFORM_KEY_RIGHT_BRACKET: paint_set_brush_size(app, app->brush_size + 1); break;
+
+        case PLATFORM_KEY_C: paint_canvas_clear(app); break;
+
         default: break;
         }
         break;
-    case PLATFORM_EV_MOUSE_DOWN:
-        printf("mouse %s pressed at (%d, %d)\n",
-               mouse_button_name(e->mouse.btn), e->mouse.x, e->mouse.y);
-        break;
+
+    case PLATFORM_EV_MOUSE_DOWN: {
+        int cx, cy;
+        if (!mouse_to_canvas(app, e->mouse.x, e->mouse.y, &cx, &cy)) break;
+        app->painting      = true;
+        app->last_paint_cx = cx;
+        app->last_paint_cy = cy;
+        apply_tool_at(app, cx, cy);
+    } break;
+
     case PLATFORM_EV_MOUSE_UP:
-        printf("mouse %s released at (%d, %d)\n",
-               mouse_button_name(e->mouse.btn), e->mouse.x, e->mouse.y);
+        app->painting = false;
         break;
+
+    case PLATFORM_EV_MOUSE_MOVE: {
+        if (!app->painting) break;
+        int cx, cy;
+        if (!mouse_to_canvas(app, e->move.x, e->move.y, &cx, &cy)) {
+            /* Cursor left the canvas mid-stroke — drop the segment but
+               don't end the stroke (re-entering the canvas continues
+               from the new position). Reset last_paint to the new spot
+               on re-entry to avoid drawing a long line across the gap. */
+            app->last_paint_cx = -1;
+            app->last_paint_cy = -1;
+            break;
+        }
+        if (app->last_paint_cx < 0) {
+            apply_tool_at(app, cx, cy);
+        } else {
+            apply_tool_stroke(app, app->last_paint_cx, app->last_paint_cy, cx, cy);
+        }
+        app->last_paint_cx = cx;
+        app->last_paint_cy = cy;
+    } break;
+
     default:
         break;
     }
@@ -568,13 +721,14 @@ static void on_cleanup(void *ud) {
 static void on_event(const platform_event_t *e, void *ud) {
     app_state_t *app = ud;
 
-    /* Mouse position tracking happens regardless of mode/overlay. */
+    /* Mouse position tracking — update the cached position regardless of
+       mode/overlay, then fall through so mode handlers can react to the
+       move (e.g. paint mode extends a stroke). */
     if (e->kind == PLATFORM_EV_MOUSE_MOVE) {
         app->mouse_x = e->move.x;
         app->mouse_y = e->move.y;
         if (!app->color_input_active && app->print_mouse_coords)
             printf("mouse: (%d, %d)\n", app->mouse_x, app->mouse_y);
-        return;
     }
 
     if (handle_global_hotkey(e)) return;
@@ -615,6 +769,11 @@ int main(void) {
         .bg_checkerboard    = false,
         .print_mouse_coords = false,
         .color_input_active = false,
+        .paint_tool         = TOOL_PENCIL,
+        .brush_size         = 5,
+        .painting           = false,
+        .last_paint_cx      = -1,
+        .last_paint_cy      = -1,
         /* paint_canvas allocated in on_init from current backing size */
     };
 
