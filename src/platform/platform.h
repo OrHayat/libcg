@@ -182,6 +182,12 @@ double platform_dt(void);
    call, starting at 0). */
 uint64_t platform_frame_count(void);
 
+/* Multiplier from logical-point mouse-event coords to framebuffer-pixel
+   coords. 1.0 when desc->high_dpi is false (fb is at logical points
+   already). On retina with desc->high_dpi true, returns the window's
+   backingScaleFactor (typically 2.0). */
+double platform_get_dpi_scale(void);
+
 /* Window controls */
 void platform_toggle_fullscreen(void);
 bool platform_is_fullscreen(void);
