@@ -79,10 +79,12 @@ static void on_cleanup(void *ud) {
 
 static void on_event(const platform_event_t *e, void *ud) {
     app_t *a = ud;
-    if (handle_global(a, e)) return;
 
-    /* Overlay: while active it eats every event except the globals above.
-       On a completed entry the color goes to the active mode. */
+    /* Overlay first: while active it eats every event, including the
+       global hotkeys — 'f' is a hex digit, so letting F-fullscreen run
+       here would toggle the window while the user types #ff0000. Esc
+       cancels the entry (never exits fullscreen while typing). On a
+       completed entry the color goes to the active mode. */
     if (a->color_input.active) {
         u32 c;
         if (color_input_event(&a->color_input, e, &c)) {
@@ -92,6 +94,9 @@ static void on_event(const platform_event_t *e, void *ud) {
         }
         return;
     }
+
+    if (handle_global(a, e)) return;
+
     if (e->kind == PLATFORM_EV_TEXT_INPUT && e->text.ch[0] == '#') {
         color_input_begin(&a->color_input);
         return;
