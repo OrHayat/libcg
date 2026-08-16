@@ -9,6 +9,7 @@ typedef enum {
     TOOL_PENCIL = 0,    /* 1px dot at cursor, current color */
     TOOL_BRUSH,         /* brush_size × brush_size square, current color */
     TOOL_ERASER,        /* brush_size × brush_size square, white */
+    TOOL_LINE,          /* press–drag–release straight line, brush_size wide */
 } paint_tool_t;
 
 typedef struct {
@@ -21,9 +22,41 @@ typedef struct {
     u32          color;             /* straight ARGB from the shell's # input */
     bool         painting;          /* mouse held during a stroke */
     int          last_cx, last_cy;  /* prev stroke point in canvas coords; -1 = none */
+
+    /* line tool: rubber-band from anchor to cursor while the button is
+       held; committed to the canvas on release. Coords may lie outside
+       the canvas — stamping clips per pixel. */
+    bool         line_active;
+    int          line_x0, line_y0;
+    int          line_x1, line_y1;
 } paint_state_t;
 
 #define CANVAS_BG 0xFFFFFFFFu
+
+/* Letterbox offset of the canvas inside the framebuffer. Single source
+   of truth — render, hit-testing and the line preview all use it, so
+   the cursor always lands exactly on the painted pixel. */
+static void canvas_offset(const platform_framebuffer_t *fb, const paint_state_t *st,
+                          int *off_x, int *off_y) {
+    *off_x = (fb->width  - st->canvas_w) / 2;
+    *off_y = (fb->height - st->canvas_h) / 2;
+}
+
+/* Fill the (2r+1)×(2r+1) square centred on (cx,cy) into any pixel grid,
+   clipped to [0,w)×[0,h). Used both for canvas stamps and the on-screen
+   line preview. */
+static void stamp_square(u32 *pixels, int w, int h, int cx, int cy, int radius, u32 color) {
+    int x0 = cx - radius, x1 = cx + radius;
+    int y0 = cy - radius, y1 = cy + radius;
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 >= w) x1 = w - 1;
+    if (y1 >= h) y1 = h - 1;
+    for (int y = y0; y <= y1; y++) {
+        u32 *row = &pixels[y * w];
+        for (int x = x0; x <= x1; x++) row[x] = color;
+    }
+}
 
 /* ---- render: letterbox the canvas inside the framebuffer ----
    Window > canvas → gray bars; window < canvas → canvas pixels are
@@ -31,13 +64,15 @@ typedef struct {
    Invariant: this and mouse_to_canvas use the same offset formula
    so the cursor lands exactly on the painted pixel. */
 
-static void render_canvas(platform_framebuffer_t *fb,
-                          const u32 *canvas, int canvas_w, int canvas_h) {
+static void render_canvas(platform_framebuffer_t *fb, const paint_state_t *st) {
+    const u32 *canvas = st->canvas;
+    int canvas_w = st->canvas_w, canvas_h = st->canvas_h;
+
     framebuffer_clear(fb, RGB(48, 48, 48));
     if (!canvas) return;
 
-    int off_x = (fb->width  - canvas_w) / 2;
-    int off_y = (fb->height - canvas_h) / 2;
+    int off_x, off_y;
+    canvas_offset(fb, st, &off_x, &off_y);
 
     int dst_x0 = off_x < 0 ? 0 : off_x;
     int dst_y0 = off_y < 0 ? 0 : off_y;
@@ -94,14 +129,16 @@ static const char *tool_name(paint_tool_t t) {
     case TOOL_PENCIL: return "pencil";
     case TOOL_BRUSH:  return "brush";
     case TOOL_ERASER: return "eraser";
+    case TOOL_LINE:   return "line";
     default:          return "?";
     }
 }
 
 /* Convert logical-point mouse coords to canvas-pixel coords. Mouse events
    arrive in logical points; the canvas is in framebuffer pixels, so scale
-   by the DPI factor then subtract the letterbox offset. Returns false if
-   the cursor is outside the canvas (in the gray bars). */
+   by the DPI factor then subtract the letterbox offset. Always writes the
+   (possibly out-of-range) coords; returns whether they're inside the
+   canvas rather than in the gray bars. */
 static bool mouse_to_canvas(const paint_state_t *st, int mouse_x, int mouse_y,
                             int *out_cx, int *out_cy) {
     /* Only width/height are read here — safe outside frame_cb. */
@@ -110,41 +147,31 @@ static bool mouse_to_canvas(const paint_state_t *st, int mouse_x, int mouse_y,
     int fb_x = (int)(mouse_x * scale);
     int fb_y = (int)(mouse_y * scale);
 
-    int off_x = (fb->width  - st->canvas_w) / 2;
-    int off_y = (fb->height - st->canvas_h) / 2;
-    int cx = fb_x - off_x;
-    int cy = fb_y - off_y;
+    int off_x, off_y;
+    canvas_offset(fb, st, &off_x, &off_y);
+    *out_cx = fb_x - off_x;
+    *out_cy = fb_y - off_y;
+    return *out_cx >= 0 && *out_cx < st->canvas_w
+        && *out_cy >= 0 && *out_cy < st->canvas_h;
+}
 
-    if (cx < 0 || cx >= st->canvas_w) return false;
-    if (cy < 0 || cy >= st->canvas_h) return false;
-    *out_cx = cx;
-    *out_cy = cy;
-    return true;
+/* Footprint of the current tool: what color and how wide it stamps. */
+static void tool_footprint(const paint_state_t *st, u32 *color, int *radius) {
+    switch (st->tool) {
+    case TOOL_PENCIL: *color = st->color; *radius = 0;                  break;
+    case TOOL_BRUSH:  *color = st->color; *radius = st->brush_size / 2; break;
+    case TOOL_LINE:   *color = st->color; *radius = st->brush_size / 2; break;
+    case TOOL_ERASER: *color = CANVAS_BG; *radius = st->brush_size / 2; break;
+    default:          *color = st->color; *radius = 0;                  break;
+    }
 }
 
 /* Apply current tool centered at canvas-pixel (cx, cy). Out-of-bounds
-   pixels in the brush footprint are clipped, not wrapped. */
+   pixels in the footprint are clipped, not wrapped. */
 static void apply_tool_at(paint_state_t *st, int cx, int cy) {
-    u32 color;
-    int radius;
-    switch (st->tool) {
-    case TOOL_PENCIL: color = st->color; radius = 0;                   break;
-    case TOOL_BRUSH:  color = st->color; radius = st->brush_size / 2;  break;
-    case TOOL_ERASER: color = CANVAS_BG; radius = st->brush_size / 2;  break;
-    default: return;
-    }
-
-    int x0 = cx - radius, x1 = cx + radius;
-    int y0 = cy - radius, y1 = cy + radius;
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 >= st->canvas_w) x1 = st->canvas_w - 1;
-    if (y1 >= st->canvas_h) y1 = st->canvas_h - 1;
-
-    for (int y = y0; y <= y1; y++) {
-        u32 *row = &st->canvas[y * st->canvas_w];
-        for (int x = x0; x <= x1; x++) row[x] = color;
-    }
+    u32 color; int radius;
+    tool_footprint(st, &color, &radius);
+    stamp_square(st->canvas, st->canvas_w, st->canvas_h, cx, cy, radius, color);
 }
 
 static void stamp_cb(int x, int y, void *ud) {
@@ -156,6 +183,33 @@ static void stamp_cb(int x, int y, void *ud) {
    strokes leave a string of dots instead of a continuous line. */
 static void apply_tool_stroke(paint_state_t *st, int x0, int y0, int x1, int y1) {
     draw2d_walk_line(x0, y0, x1, y1, stamp_cb, st);
+}
+
+/* Line-tool preview: stamp the footprint straight into the framebuffer
+   at canvas→fb offset, so the canvas itself is untouched until release. */
+typedef struct {
+    platform_framebuffer_t *fb;
+    int off_x, off_y;
+    int radius;
+    u32 color;
+} preview_ctx_t;
+
+static void preview_cb(int x, int y, void *ud) {
+    preview_ctx_t *c = ud;
+    stamp_square(c->fb->pixels, c->fb->width, c->fb->height,
+                 x + c->off_x, y + c->off_y, c->radius, c->color);
+}
+
+static void render_line_preview(platform_framebuffer_t *fb, const paint_state_t *st) {
+    preview_ctx_t c = { .fb = fb };
+    canvas_offset(fb, st, &c.off_x, &c.off_y);
+    tool_footprint(st, &c.color, &c.radius);
+    draw2d_walk_line(st->line_x0, st->line_y0, st->line_x1, st->line_y1, preview_cb, &c);
+}
+
+static void line_commit(paint_state_t *st) {
+    draw2d_walk_line(st->line_x0, st->line_y0, st->line_x1, st->line_y1, stamp_cb, st);
+    st->line_active = false;
 }
 
 static void canvas_clear(paint_state_t *st) {
@@ -208,7 +262,8 @@ static void cleanup(app_mode_t *m) {
 
 static void leave(app_mode_t *m) {
     paint_state_t *st = m->state;
-    st->painting = false;             /* don't resume a stroke on re-enter */
+    st->painting    = false;          /* don't resume a stroke on re-enter */
+    st->line_active = false;          /* uncommitted line is dropped */
 }
 
 static void event(app_mode_t *m, const platform_event_t *e) {
@@ -220,6 +275,10 @@ static void event(app_mode_t *m, const platform_event_t *e) {
         case PLATFORM_KEY_1: set_tool(st, TOOL_PENCIL); break;
         case PLATFORM_KEY_2: set_tool(st, TOOL_BRUSH);  break;
         case PLATFORM_KEY_3: set_tool(st, TOOL_ERASER); break;
+        case PLATFORM_KEY_4: set_tool(st, TOOL_LINE);   break;
+        case PLATFORM_KEY_ESCAPE:
+            if (st->line_active) { st->line_active = false; printf("line cancelled\n"); }
+            break;
         case PLATFORM_KEY_LEFT_BRACKET:  set_brush_size(st, st->brush_size - 1); break;
         case PLATFORM_KEY_RIGHT_BRACKET: set_brush_size(st, st->brush_size + 1); break;
         case PLATFORM_KEY_C:
@@ -234,6 +293,12 @@ static void event(app_mode_t *m, const platform_event_t *e) {
         if (e->mouse.btn != PLATFORM_MOUSE_LEFT) break;
         int cx, cy;
         if (!mouse_to_canvas(st, e->mouse.x, e->mouse.y, &cx, &cy)) break;
+        if (st->tool == TOOL_LINE) {
+            st->line_active = true;
+            st->line_x0 = st->line_x1 = cx;
+            st->line_y0 = st->line_y1 = cy;
+            break;
+        }
         st->painting = true;
         st->last_cx  = cx;
         st->last_cy  = cy;
@@ -242,10 +307,18 @@ static void event(app_mode_t *m, const platform_event_t *e) {
 
     case PLATFORM_EV_MOUSE_UP:
         if (e->mouse.btn != PLATFORM_MOUSE_LEFT) break;
+        if (st->line_active) {
+            mouse_to_canvas(st, e->mouse.x, e->mouse.y, &st->line_x1, &st->line_y1);
+            line_commit(st);
+        }
         st->painting = false;
         break;
 
     case PLATFORM_EV_MOUSE_MOVE: {
+        if (st->line_active) {
+            mouse_to_canvas(st, e->move.x, e->move.y, &st->line_x1, &st->line_y1);
+            break;
+        }
         if (!st->painting) break;
         int cx, cy;
         if (!mouse_to_canvas(st, e->move.x, e->move.y, &cx, &cy)) {
@@ -269,7 +342,8 @@ static void event(app_mode_t *m, const platform_event_t *e) {
 
 static void frame(app_mode_t *m, platform_framebuffer_t *fb) {
     paint_state_t *st = m->state;
-    render_canvas(fb, st->canvas, st->canvas_w, st->canvas_h);
+    render_canvas(fb, st);
+    if (st->line_active) render_line_preview(fb, st);
 }
 
 static void set_color(app_mode_t *m, u32 argb) {
