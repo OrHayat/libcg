@@ -1,4 +1,5 @@
 #include "modes/paint.h"
+#include "render/draw2d.h"
 #include "render/framebuffer.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -146,22 +147,15 @@ static void apply_tool_at(paint_state_t *st, int cx, int cy) {
     }
 }
 
-/* Bresenham line — fills pixel gaps when the mouse moves faster than
-   one event per pixel. Without this, fast strokes leave a string of
-   dots instead of a continuous line. */
+static void stamp_cb(int x, int y, void *ud) {
+    apply_tool_at(ud, x, y);
+}
+
+/* Stamp the tool along a Bresenham line — fills pixel gaps when the
+   mouse moves faster than one event per pixel. Without this, fast
+   strokes leave a string of dots instead of a continuous line. */
 static void apply_tool_stroke(paint_state_t *st, int x0, int y0, int x1, int y1) {
-    int dx =  abs(x1 - x0);
-    int dy = -abs(y1 - y0);
-    int sx = x0 < x1 ? 1 : -1;
-    int sy = y0 < y1 ? 1 : -1;
-    int err = dx + dy;
-    for (;;) {
-        apply_tool_at(st, x0, y0);
-        if (x0 == x1 && y0 == y1) break;
-        int e2 = 2 * err;
-        if (e2 >= dy) { err += dy; x0 += sx; }
-        if (e2 <= dx) { err += dx; y0 += sy; }
-    }
+    draw2d_walk_line(x0, y0, x1, y1, stamp_cb, st);
 }
 
 static void canvas_clear(paint_state_t *st) {
