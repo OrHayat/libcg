@@ -54,12 +54,14 @@ static void canvas_offset(const platform_framebuffer_t *fb, const paint_state_t 
     *off_y = (fb->height - st->canvas_h) / 2;
 }
 
-/* Fill the (2r+1)×(2r+1) square centred on (cx,cy) into any pixel grid,
-   clipped to [0,w)×[0,h). Used both for canvas stamps and the on-screen
-   line preview. */
-static void stamp_square(u32 *pixels, int w, int h, int cx, int cy, int radius, u32 color) {
-    int x0 = cx - radius, x1 = cx + radius;
-    int y0 = cy - radius, y1 = cy + radius;
+/* Fill a size×size square anchored on (cx,cy) into any pixel grid, clipped
+   to [0,w)×[0,h). Width is exactly `size`: a 4 really is 4px across, sitting
+   half a pixel off centre. Deriving a radius as size/2 instead would make
+   every even size identical to the odd one below it, so half the [ / ]
+   presses would change nothing on screen. */
+static void stamp_square(u32 *pixels, int w, int h, int cx, int cy, int size, u32 color) {
+    int x0 = cx - (size - 1) / 2, x1 = x0 + size - 1;
+    int y0 = cy - (size - 1) / 2, y1 = y0 + size - 1;
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 >= w) x1 = w - 1;
@@ -169,26 +171,22 @@ static bool mouse_to_canvas(const paint_state_t *st, int mouse_x, int mouse_y,
         && *out_cy >= 0 && *out_cy < st->canvas_h;
 }
 
-/* Footprint of the current tool: what color and how wide it stamps. */
-static void tool_footprint(const paint_state_t *st, u32 *color, int *radius) {
+/* Footprint of the current tool: what color it lays down and how many
+   pixels across. Pencil is fixed at 1px; every other tool tracks brush_size. */
+static void tool_footprint(const paint_state_t *st, u32 *color, int *size) {
     switch (st->tool) {
-    case TOOL_PENCIL: *color = st->color; *radius = 0;                  break;
-    case TOOL_BRUSH:  *color = st->color; *radius = st->brush_size / 2; break;
-    case TOOL_LINE:   *color = st->color; *radius = st->brush_size / 2; break;
-    case TOOL_TRIANGLE:
-    case TOOL_TRIANGLE_WIRE:
-                      *color = st->color; *radius = st->brush_size / 2; break;
-    case TOOL_ERASER: *color = CANVAS_BG; *radius = st->brush_size / 2; break;
-    default:          *color = st->color; *radius = 0;                  break;
+    case TOOL_PENCIL: *color = st->color; *size = 1;              break;
+    case TOOL_ERASER: *color = CANVAS_BG; *size = st->brush_size; break;
+    default:          *color = st->color; *size = st->brush_size; break;
     }
 }
 
 /* Apply current tool centered at canvas-pixel (cx, cy). Out-of-bounds
    pixels in the footprint are clipped, not wrapped. */
 static void apply_tool_at(paint_state_t *st, int cx, int cy) {
-    u32 color; int radius;
-    tool_footprint(st, &color, &radius);
-    stamp_square(st->canvas, st->canvas_w, st->canvas_h, cx, cy, radius, color);
+    u32 color; int size;
+    tool_footprint(st, &color, &size);
+    stamp_square(st->canvas, st->canvas_w, st->canvas_h, cx, cy, size, color);
 }
 
 static void stamp_cb(int x, int y, void *ud) {
@@ -207,21 +205,21 @@ static void apply_tool_stroke(paint_state_t *st, int x0, int y0, int x1, int y1)
 typedef struct {
     platform_framebuffer_t *fb;
     int off_x, off_y;
-    int radius;
+    int size;
     u32 color;
 } preview_ctx_t;
 
 static void preview_cb(int x, int y, void *ud) {
     preview_ctx_t *c = ud;
     stamp_square(c->fb->pixels, c->fb->width, c->fb->height,
-                 x + c->off_x, y + c->off_y, c->radius, c->color);
+                 x + c->off_x, y + c->off_y, c->size, c->color);
 }
 
 static void preview_segment(platform_framebuffer_t *fb, const paint_state_t *st,
                             int x0, int y0, int x1, int y1) {
     preview_ctx_t c = { .fb = fb };
     canvas_offset(fb, st, &c.off_x, &c.off_y);
-    tool_footprint(st, &c.color, &c.radius);
+    tool_footprint(st, &c.color, &c.size);
     draw2d_walk_line(x0, y0, x1, y1, preview_cb, &c);
 }
 
@@ -281,12 +279,13 @@ static void set_tool(paint_state_t *st, paint_tool_t t) {
     else                        printf("tool: %s (size %d)\n", tool_name(t), st->brush_size);
 }
 
+/* Always echoes, whatever the tool — a silent [ / ] reads as a dead key. */
 static void set_brush_size(paint_state_t *st, int size) {
     if (size < 1)  size = 1;
     if (size > 32) size = 32;
     st->brush_size = size;
-    if (st->tool == TOOL_BRUSH || st->tool == TOOL_ERASER)
-        printf("brush size: %d\n", st->brush_size);
+    printf("size: %d%s\n", st->brush_size,
+           st->tool == TOOL_PENCIL ? " (unused by pencil)" : "");
 }
 
 /* ---- mode callbacks ---- */
