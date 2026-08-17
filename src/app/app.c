@@ -33,6 +33,7 @@ static bool handle_global(app_t *a, const platform_event_t *e) {
         return false;                       /* modes still see MOVE */
     }
     if (e->kind != PLATFORM_EV_KEY_DOWN || e->key.repeat) return false;
+    if (!platform_key_is_plain(e)) return false;   /* Shift+F is '#'-style input, not fullscreen */
 
     platform_key_t k = e->key.key;
     if (k >= PLATFORM_KEY_F1 && k <= PLATFORM_KEY_F12) {

@@ -177,13 +177,29 @@ static void drain_event_queue(void) {
     return YES;
 }
 
+// Map AppKit's modifier flags to our bitmask. Shift matters to callers
+// because a shifted key still reports its unshifted keycode: '#' arrives as
+// KEY_DOWN(3) plus TEXT_INPUT('#'), and a mode binding '3' to a tool would
+// otherwise fire every time the user typed '#'.
+static uint32_t mods_from_event(NSEvent *nsevent) {
+    NSUInteger f = [nsevent modifierFlags];
+    uint32_t m = 0;
+    if (f & NSEventModifierFlagShift)   m |= PLATFORM_MOD_SHIFT;
+    if (f & NSEventModifierFlagControl) m |= PLATFORM_MOD_CTRL;
+    if (f & NSEventModifierFlagOption)  m |= PLATFORM_MOD_ALT;
+    if (f & NSEventModifierFlagCommand) m |= PLATFORM_MOD_SUPER;
+    return m;
+}
+
 - (void)keyDown:(NSEvent *)nsevent {
     platform_key_t key = kc_to_key[[nsevent keyCode] & 0xFF];
     if (key == PLATFORM_KEY_UNKNOWN) return;
 
     platform_event_t e = {
         .kind = PLATFORM_EV_KEY_DOWN,
-        .key  = { .key = key, .repeat = (bool)[nsevent isARepeat] },
+        .key  = { .key  = key,
+                  .repeat = (bool)[nsevent isARepeat],
+                  .mods = mods_from_event(nsevent) },
     };
     enqueue_event(&e);
 
@@ -215,7 +231,7 @@ static void drain_event_queue(void) {
 
     platform_event_t e = {
         .kind = PLATFORM_EV_KEY_UP,
-        .key  = { .key = key, .repeat = false },
+        .key  = { .key = key, .repeat = false, .mods = mods_from_event(nsevent) },
     };
     enqueue_event(&e);
 }
@@ -248,7 +264,7 @@ static void drain_event_queue(void) {
 
     platform_event_t e = {
         .kind = is_down ? PLATFORM_EV_KEY_DOWN : PLATFORM_EV_KEY_UP,
-        .key  = { .key = key, .repeat = false },
+        .key  = { .key = key, .repeat = false, .mods = mods_from_event(nsevent) },
     };
     enqueue_event(&e);
 }

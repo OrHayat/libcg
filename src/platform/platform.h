@@ -82,9 +82,21 @@ typedef enum {
     PLATFORM_EV_COUNT
 } platform_event_kind_t;
 
+/* Modifier keys held when a key event was generated, as a bitmask.
+   Only these four are reported: the function / numeric-pad flags macOS
+   sets for arrows and F-keys are deliberately excluded, so a plain arrow
+   press still reports mods == 0. */
+typedef enum {
+    PLATFORM_MOD_SHIFT = 1u << 0,
+    PLATFORM_MOD_CTRL  = 1u << 1,
+    PLATFORM_MOD_ALT   = 1u << 2,
+    PLATFORM_MOD_SUPER = 1u << 3,     /* Command on macOS, Windows key elsewhere */
+} platform_mod_t;
+
 typedef struct {
     platform_key_t key;
     bool           repeat;
+    uint32_t       mods;      /* bitwise OR of platform_mod_t */
 } platform_key_event_t;
 
 typedef struct {
@@ -123,6 +135,15 @@ typedef struct {
         platform_resize_event_t     resize;
     };
 } platform_event_t;
+
+/* True for an unmodified key press. Single-key shortcuts should require
+   this: a shifted key still reports its *unshifted* code, so '#' (Shift+3)
+   arrives as KEY_DOWN(3) and would otherwise trigger a binding on '3'.
+   Arrow and function keys report mods == 0, as macOS's function and
+   numeric-pad flags are deliberately not mapped. */
+static inline bool platform_key_is_plain(const platform_event_t *e) {
+    return e->key.mods == 0;
+}
 
 /* ============================================================
    App descriptor + entry point. Sokol/SDL3-style: caller fills in
