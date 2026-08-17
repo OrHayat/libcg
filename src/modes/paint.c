@@ -378,6 +378,13 @@ static void paint_open(paint_state_t *st) {
         return;
     }
 
+    /* Flatten onto white paper. A loaded file can carry real alpha, but the
+       canvas is an opaque surface — keeping translucent pixels would let
+       the desktop show through the paper and would break the assumption
+       that saving produces the image you can see. */
+    for (size_t i = 0, n = (size_t)w * (size_t)h; i < n; i++)
+        pixels[i] = color_blend(CANVAS_BG, pixels[i]);
+
     free(st->canvas);
     st->canvas   = pixels;
     st->canvas_w = w;
