@@ -1,4 +1,5 @@
 #include "render/draw2d.h"
+#include "render/color.h"
 #include "render/framebuffer.h"
 #include <stdbool.h>
 #include <stdlib.h>
@@ -68,8 +69,9 @@ static bool edge_is_top_left(int ax, int ay, int bx, int by) {
 static int imin3(int a, int b, int c) { int m = a < b ? a : b; return m < c ? m : c; }
 static int imax3(int a, int b, int c) { int m = a > b ? a : b; return m > c ? m : c; }
 
-void draw2d_triangle_fill(platform_framebuffer_t *fb,
-                          int x0, int y0, int x1, int y1, int x2, int y2, uint32_t color) {
+static void triangle_fill_impl(platform_framebuffer_t *fb,
+                               int x0, int y0, int x1, int y1, int x2, int y2,
+                               uint32_t color, bool blend) {
     int area = edge(x0, y0, x1, y1, x2, y2);
     if (area == 0) return;                      /* degenerate: no pixels */
     if (area < 0) {                             /* normalize to positive winding */
@@ -97,8 +99,21 @@ void draw2d_triangle_fill(platform_framebuffer_t *fb,
             int w0 = edge(x1, y1, x2, y2, x, y) + bias0;
             int w1 = edge(x2, y2, x0, y0, x, y) + bias1;
             int w2 = edge(x0, y0, x1, y1, x, y) + bias2;
-            if ((w0 | w1 | w2) >= 0)            /* all three non-negative */
-                fb->pixels[y * fb->width + x] = color;
+            if ((w0 | w1 | w2) >= 0) {          /* all three non-negative */
+                uint32_t *px = &fb->pixels[y * fb->width + x];
+                *px = blend ? color_blend(*px, color) : color;
+            }
         }
     }
+}
+
+void draw2d_triangle_fill(platform_framebuffer_t *fb,
+                          int x0, int y0, int x1, int y1, int x2, int y2, uint32_t color) {
+    triangle_fill_impl(fb, x0, y0, x1, y1, x2, y2, color, false);
+}
+
+void draw2d_triangle_fill_blend(platform_framebuffer_t *fb,
+                                int x0, int y0, int x1, int y1, int x2, int y2,
+                                uint32_t premul_color) {
+    triangle_fill_impl(fb, x0, y0, x1, y1, x2, y2, premul_color, true);
 }

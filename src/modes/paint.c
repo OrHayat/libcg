@@ -1,4 +1,5 @@
 #include "modes/paint.h"
+#include "render/color.h"
 #include "render/draw2d.h"
 #include "render/framebuffer.h"
 #include "util/image.h"
@@ -59,7 +60,15 @@ static void canvas_offset(const platform_framebuffer_t *fb, const paint_state_t 
    to [0,w)×[0,h). Width is exactly `size`: a 4 really is 4px across, sitting
    half a pixel off centre. Deriving a radius as size/2 instead would make
    every even size identical to the odd one below it, so half the [ / ]
-   presses would change nothing on screen. */
+   presses would change nothing on screen.
+
+   `color` is premultiplied and composited source-over, so alpha behaves as
+   paint opacity and the destination stays opaque. Writing the color in
+   directly would leave the canvas holding invalid premultiplied pixels (R
+   greater than A), which CoreGraphics clamps — turning translucent colors
+   dark instead of transparent. Overlapping stamps inside one stroke
+   composite more than once, so a translucent brush darkens where it crosses
+   itself; avoiding that needs a scratch layer per stroke. */
 static void stamp_square(u32 *pixels, int w, int h, int cx, int cy, int size, u32 color) {
     int x0 = cx - (size - 1) / 2, x1 = x0 + size - 1;
     int y0 = cy - (size - 1) / 2, y1 = y0 + size - 1;
@@ -69,7 +78,7 @@ static void stamp_square(u32 *pixels, int w, int h, int cx, int cy, int size, u3
     if (y1 >= h) y1 = h - 1;
     for (int y = y0; y <= y1; y++) {
         u32 *row = &pixels[y * w];
-        for (int x = x0; x <= x1; x++) row[x] = color;
+        for (int x = x0; x <= x1; x++) row[x] = color_blend(row[x], color);
     }
 }
 
@@ -172,14 +181,17 @@ static bool mouse_to_canvas(const paint_state_t *st, int mouse_x, int mouse_y,
         && *out_cy >= 0 && *out_cy < st->canvas_h;
 }
 
-/* Footprint of the current tool: what color it lays down and how many
-   pixels across. Pencil is fixed at 1px; every other tool tracks brush_size. */
+/* Footprint of the current tool: the premultiplied color it lays down and
+   how many pixels across. Pencil is fixed at 1px; every other tool tracks
+   brush_size. */
 static void tool_footprint(const paint_state_t *st, u32 *color, int *size) {
     switch (st->tool) {
     case TOOL_PENCIL: *color = st->color; *size = 1;              break;
+    /* Opaque white, so compositing the eraser is a plain replace. */
     case TOOL_ERASER: *color = CANVAS_BG; *size = st->brush_size; break;
     default:          *color = st->color; *size = st->brush_size; break;
     }
+    *color = color_premultiply(*color);
 }
 
 /* Apply current tool centered at canvas-pixel (cx, cy). Out-of-bounds
@@ -259,7 +271,8 @@ static void triangle_commit(paint_state_t *st) {
         platform_framebuffer_t canvas_fb = {
             .pixels = st->canvas, .width = st->canvas_w, .height = st->canvas_h,
         };
-        draw2d_triangle_fill(&canvas_fb, x[0], y[0], x[1], y[1], x[2], y[2], st->color);
+        draw2d_triangle_fill_blend(&canvas_fb, x[0], y[0], x[1], y[1], x[2], y[2],
+                                   color_premultiply(st->color));
     }
     st->tri_n = 0;
 }

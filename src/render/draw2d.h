@@ -30,4 +30,10 @@ void draw2d_triangle_wire(platform_framebuffer_t *fb,
 void draw2d_triangle_fill(platform_framebuffer_t *fb,
                           int x0, int y0, int x1, int y1, int x2, int y2, uint32_t color);
 
+/* Same coverage, but source-over blends instead of replacing. `color` must
+   already be premultiplied, as must the destination. */
+void draw2d_triangle_fill_blend(platform_framebuffer_t *fb,
+                                int x0, int y0, int x1, int y1, int x2, int y2,
+                                uint32_t premul_color);
+
 #endif /* DRAW2D_H */
