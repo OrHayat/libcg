@@ -9,11 +9,19 @@
 /* Writes a 24-bit uncompressed BMP. Alpha is dropped: BMP's 32-bit form
    declares its fourth byte "reserved", so readers disagree on whether it
    means transparency, and 24-bit is the variant every decoder agrees on.
-   Returns false on any I/O error. */
+   Source pixels are assumed premultiplied and opaque, which is what the
+   framebuffer and the paint canvas hold. Returns false on any I/O error. */
 bool image_save_bmp(const char *path, const u32 *pixels, int w, int h);
 
-/* Reads an uncompressed 24- or 32-bit BMP. On success *out_pixels is a
-   malloc'd buffer the caller owns and must free. */
+/* Reads a 16-, 24- or 32-bit BMP, either BI_RGB or BI_BITFIELDS. Channel
+   positions come from the file's own masks rather than an assumed byte
+   order, because exporters disagree: GIMP and Photoshop routinely write
+   32-bit BMPs as BI_BITFIELDS with an explicit alpha mask.
+
+   Output is premultiplied 0xAARRGGBB, matching the framebuffer, so a
+   decoded image can be blitted or blended without further conversion.
+   Files with a colour palette (1/4/8 bpp) and RLE-compressed files are
+   rejected. On success *out_pixels is a malloc'd buffer the caller owns. */
 bool image_load_bmp(const char *path, u32 **out_pixels, int *out_w, int *out_h);
 
 #endif /* IMAGE_H */
