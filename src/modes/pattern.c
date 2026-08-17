@@ -1,5 +1,6 @@
 #include "modes/pattern.h"
 #include "render/color.h"
+#include "render/draw2d.h"
 #include "render/framebuffer.h"
 #include <math.h>
 #include <stdio.h>
@@ -10,6 +11,7 @@ typedef enum {
     PATTERN_GRADIENT,
     PATTERN_CYCLE,
     PATTERN_NOISE,
+    PATTERN_PRIMITIVES,
     PATTERN_CUSTOM_COLOR,
 } pattern_t;
 
@@ -58,6 +60,70 @@ static void render_noise(platform_framebuffer_t *fb) {
     }
 }
 
+/* draw2d showcase: one primitive per quadrant, sized off the framebuffer
+   so it holds up at any window size and on retina.
+     TL  starburst of lines (every octant of the Bresenham walk)
+     TR  wireframe triangle
+     BL  two overlapping filled triangles — edge coverage under overwrite
+     BR  two filled triangles sharing a diagonal — the top-left fill rule
+         means the seam shows neither a background gap nor a double-drawn
+         line; any dark pixels along it would be a rasterizer bug. */
+static void render_primitives(platform_framebuffer_t *fb) {
+    framebuffer_clear(fb, RGB(24, 24, 32));
+
+    int qw = fb->width / 2, qh = fb->height / 2;
+    if (qw < 8 || qh < 8) return;
+
+    int m = (qw < qh ? qw : qh) / 8;          /* margin */
+
+    /* --- TL: starburst --- */
+    {
+        int cx = qw / 2, cy = qh / 2;
+        int r  = (qw < qh ? qw : qh) / 2 - m;
+        for (int i = 0; i < 24; i++) {
+            double a = (double)i * 6.28318530718 / 24.0;
+            int ex = cx + (int)(cos(a) * r);
+            int ey = cy + (int)(sin(a) * r);
+            u8 v = (u8)(80 + (i * 175) / 24);
+            draw2d_line(fb, cx, cy, ex, ey, RGB(v, v, 255 - v));
+        }
+    }
+
+    /* --- TR: wireframe triangle --- */
+    {
+        int ox = qw;
+        draw2d_triangle_wire(fb,
+                             ox + qw / 2, m,
+                             ox + qw - m, qh - m,
+                             ox + m,      qh - m,
+                             RGB(255, 255, 255));
+    }
+
+    /* --- BL: overlapping fills --- */
+    {
+        int oy = qh;
+        draw2d_triangle_fill(fb,
+                             m,          oy + m,
+                             qw - m,     oy + qh / 2,
+                             qw / 2,     oy + qh - m,
+                             RGB(220, 60, 60));
+        draw2d_triangle_fill(fb,
+                             qw - m,     oy + m,
+                             qw / 2 + m, oy + qh - m,
+                             m,          oy + qh / 2,
+                             RGB(60, 200, 90));
+    }
+
+    /* --- BR: shared-edge quad (seam check) --- */
+    {
+        int ox = qw, oy = qh;
+        int x0 = ox + m,      y0 = oy + m;
+        int x1 = ox + qw - m, y1 = oy + qh - m;
+        draw2d_triangle_fill(fb, x0, y0, x1, y0, x0, y1, RGB(70, 110, 230));
+        draw2d_triangle_fill(fb, x1, y0, x1, y1, x0, y1, RGB(240, 160, 40));
+    }
+}
+
 static void render_checkerboard(platform_framebuffer_t *fb) {
     int cell = 32;
     for (int y = 0; y < fb->height; y++) {
@@ -101,7 +167,8 @@ static void event(app_mode_t *m, const platform_event_t *e) {
         case PLATFORM_KEY_1: st->pattern = PATTERN_SOLID;    break;
         case PLATFORM_KEY_2: st->pattern = PATTERN_GRADIENT; break;
         case PLATFORM_KEY_3: st->pattern = PATTERN_CYCLE;    break;
-        case PLATFORM_KEY_4: st->pattern = PATTERN_NOISE;    break;
+        case PLATFORM_KEY_4: st->pattern = PATTERN_NOISE;      break;
+        case PLATFORM_KEY_5: st->pattern = PATTERN_PRIMITIVES; break;
         case PLATFORM_KEY_B:
             st->bg_checkerboard = !st->bg_checkerboard;
             printf("background: %s\n", st->bg_checkerboard ? "checkerboard" : "transparent");
@@ -140,6 +207,7 @@ static void frame(app_mode_t *m, platform_framebuffer_t *fb) {
     case PATTERN_GRADIENT:     render_gradient(fb);                       break;
     case PATTERN_CYCLE:        render_cycle(fb, platform_now() * 3.0);    break;
     case PATTERN_NOISE:        render_noise(fb);                          break;
+    case PATTERN_PRIMITIVES:   render_primitives(fb);                     break;
     case PATTERN_CUSTOM_COLOR: render_custom_color(fb, st->custom_color); break;
     }
 }
