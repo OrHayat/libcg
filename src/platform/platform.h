@@ -2,6 +2,7 @@
 #define PLATFORM_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct {
@@ -187,6 +188,21 @@ uint64_t platform_frame_count(void);
    already). On retina with desc->high_dpi true, returns the window's
    backingScaleFactor (typically 2.0). */
 double platform_get_dpi_scale(void);
+
+/* ============================================================
+   Modal file dialogs. Both return false when the user cancels, and
+   otherwise write the chosen path into out_path (NUL-terminated,
+   truncated if it will not fit).
+
+   `extensions` is a NULL-terminated array of lowercase extensions
+   without dots, e.g. (const char *[]){"bmp", NULL}; pass NULL to accept
+   any file. These run a nested modal loop: no frame_cb fires until the
+   dialog is dismissed, so time jumps forward across the call.
+   ============================================================ */
+bool platform_save_dialog(const char *suggested_name, const char *const *extensions,
+                          char *out_path, size_t out_size);
+bool platform_open_dialog(const char *const *extensions,
+                          char *out_path, size_t out_size);
 
 /* Window controls */
 void platform_toggle_fullscreen(void);
