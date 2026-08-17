@@ -269,23 +269,56 @@ static void canvas_clear(paint_state_t *st) {
     for (size_t i = 0; i < n; i++) st->canvas[i] = CANVAS_BG;
 }
 
+/* Single place that announces the current tool, so the number keys and
+   the [ / ] ramp never report it two different ways. The pencil prints no
+   width: it is always 1px, and brush_size still holds whatever the eraser
+   and shape tools are using. */
+static void print_tool(const paint_state_t *st) {
+    if (st->tool == TOOL_PENCIL)
+        printf("tool: pencil\n");
+    else if (tool_is_triangle(st->tool))
+        printf("tool: %s (size %d) — click 3 corners, Esc cancels\n",
+               tool_name(st->tool), st->brush_size);
+    else
+        printf("tool: %s (size %d)\n", tool_name(st->tool), st->brush_size);
+}
+
 static void set_tool(paint_state_t *st, paint_tool_t t) {
     st->tool        = t;
     st->line_active = false;      /* drop any half-placed shape */
     st->tri_n       = 0;
-    if (t == TOOL_PENCIL)       printf("tool: pencil\n");
-    else if (tool_is_triangle(t)) printf("tool: %s (size %d) — click 3 corners, Esc cancels\n",
-                                         tool_name(t), st->brush_size);
-    else                        printf("tool: %s (size %d)\n", tool_name(t), st->brush_size);
+    print_tool(st);
 }
 
-/* Always echoes, whatever the tool — a silent [ / ] reads as a dead key. */
-static void set_brush_size(paint_state_t *st, int size) {
-    if (size < 1)  size = 1;
-    if (size > 32) size = 32;
-    st->brush_size = size;
-    printf("size: %d%s\n", st->brush_size,
-           st->tool == TOOL_PENCIL ? " (unused by pencil)" : "");
+static int clamp_size(int size) {
+    if (size < 1)  return 1;
+    if (size > 32) return 32;
+    return size;
+}
+
+/* [ and ] walk one continuous 1..32 width ramp. Pencil and brush are the
+   same square stamp differing only in width, so width 1 *is* the pencil and
+   2+ is the brush: stepping up off the pencil switches tool rather than
+   doing nothing, and stepping the brush down to 1 lands back on the pencil.
+   Eraser and the shape tools keep their own plain size adjustment.
+   Always echoes — a silent [ / ] reads as a dead key. */
+static void adjust_size(paint_state_t *st, int delta) {
+    if (st->tool != TOOL_PENCIL && st->tool != TOOL_BRUSH) {
+        st->brush_size = clamp_size(st->brush_size + delta);
+        printf("size: %d\n", st->brush_size);
+        return;
+    }
+
+    int current = (st->tool == TOOL_PENCIL) ? 1 : st->brush_size;
+    int next    = clamp_size(current + delta);
+    if (next <= 1) {
+        st->tool = TOOL_PENCIL;        /* brush_size left alone, so the
+                                          eraser keeps the width it had */
+    } else {
+        st->tool       = TOOL_BRUSH;
+        st->brush_size = next;
+    }
+    print_tool(st);
 }
 
 /* ---- mode callbacks ---- */
@@ -339,8 +372,8 @@ static void event(app_mode_t *m, const platform_event_t *e) {
             if (st->line_active) { st->line_active = false; printf("line cancelled\n"); }
             if (st->tri_n)       { st->tri_n = 0;           printf("triangle cancelled\n"); }
             break;
-        case PLATFORM_KEY_LEFT_BRACKET:  set_brush_size(st, st->brush_size - 1); break;
-        case PLATFORM_KEY_RIGHT_BRACKET: set_brush_size(st, st->brush_size + 1); break;
+        case PLATFORM_KEY_LEFT_BRACKET:  adjust_size(st, -1); break;
+        case PLATFORM_KEY_RIGHT_BRACKET: adjust_size(st, +1); break;
         case PLATFORM_KEY_C:
             canvas_clear(st);
             printf("canvas cleared\n");
