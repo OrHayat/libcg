@@ -10,7 +10,13 @@ typedef enum {
     TOOL_BRUSH,         /* brush_size × brush_size square, current color */
     TOOL_ERASER,        /* brush_size × brush_size square, white */
     TOOL_LINE,          /* press–drag–release straight line, brush_size wide */
+    TOOL_TRIANGLE,      /* click 3 corners, filled with current color */
+    TOOL_TRIANGLE_WIRE, /* click 3 corners, outline brush_size wide */
 } paint_tool_t;
+
+static bool tool_is_triangle(paint_tool_t t) {
+    return t == TOOL_TRIANGLE || t == TOOL_TRIANGLE_WIRE;
+}
 
 typedef struct {
     /* fixed-size canvas that survives window resizes */
@@ -29,6 +35,12 @@ typedef struct {
     bool         line_active;
     int          line_x0, line_y0;
     int          line_x1, line_y1;
+
+    /* triangle tool: click-click-click. tri_n counts committed corners
+       (0..2); slot [tri_n] tracks the cursor so the rubber-band preview
+       always has a live third point. The 3rd click commits and resets. */
+    int          tri_n;
+    int          tri_x[3], tri_y[3];
 } paint_state_t;
 
 #define CANVAS_BG 0xFFFFFFFFu
@@ -130,6 +142,8 @@ static const char *tool_name(paint_tool_t t) {
     case TOOL_BRUSH:  return "brush";
     case TOOL_ERASER: return "eraser";
     case TOOL_LINE:   return "line";
+    case TOOL_TRIANGLE:      return "triangle";
+    case TOOL_TRIANGLE_WIRE: return "triangle outline";
     default:          return "?";
     }
 }
@@ -161,6 +175,9 @@ static void tool_footprint(const paint_state_t *st, u32 *color, int *radius) {
     case TOOL_PENCIL: *color = st->color; *radius = 0;                  break;
     case TOOL_BRUSH:  *color = st->color; *radius = st->brush_size / 2; break;
     case TOOL_LINE:   *color = st->color; *radius = st->brush_size / 2; break;
+    case TOOL_TRIANGLE:
+    case TOOL_TRIANGLE_WIRE:
+                      *color = st->color; *radius = st->brush_size / 2; break;
     case TOOL_ERASER: *color = CANVAS_BG; *radius = st->brush_size / 2; break;
     default:          *color = st->color; *radius = 0;                  break;
     }
@@ -200,16 +217,52 @@ static void preview_cb(int x, int y, void *ud) {
                  x + c->off_x, y + c->off_y, c->radius, c->color);
 }
 
-static void render_line_preview(platform_framebuffer_t *fb, const paint_state_t *st) {
+static void preview_segment(platform_framebuffer_t *fb, const paint_state_t *st,
+                            int x0, int y0, int x1, int y1) {
     preview_ctx_t c = { .fb = fb };
     canvas_offset(fb, st, &c.off_x, &c.off_y);
     tool_footprint(st, &c.color, &c.radius);
-    draw2d_walk_line(st->line_x0, st->line_y0, st->line_x1, st->line_y1, preview_cb, &c);
+    draw2d_walk_line(x0, y0, x1, y1, preview_cb, &c);
+}
+
+static void render_line_preview(platform_framebuffer_t *fb, const paint_state_t *st) {
+    preview_segment(fb, st, st->line_x0, st->line_y0, st->line_x1, st->line_y1);
 }
 
 static void line_commit(paint_state_t *st) {
     draw2d_walk_line(st->line_x0, st->line_y0, st->line_x1, st->line_y1, stamp_cb, st);
     st->line_active = false;
+}
+
+/* Outline preview for both triangle tools — the fill only appears on
+   commit, so an in-progress shape always reads as in-progress. */
+static void render_triangle_preview(platform_framebuffer_t *fb, const paint_state_t *st) {
+    const int *x = st->tri_x, *y = st->tri_y;
+    if (st->tri_n == 1) {
+        preview_segment(fb, st, x[0], y[0], x[1], y[1]);
+    } else if (st->tri_n == 2) {
+        preview_segment(fb, st, x[0], y[0], x[1], y[1]);
+        preview_segment(fb, st, x[1], y[1], x[2], y[2]);
+        preview_segment(fb, st, x[2], y[2], x[0], y[0]);
+    }
+}
+
+static void triangle_commit(paint_state_t *st) {
+    const int *x = st->tri_x, *y = st->tri_y;
+    if (st->tool == TOOL_TRIANGLE_WIRE) {
+        apply_tool_stroke(st, x[0], y[0], x[1], y[1]);
+        apply_tool_stroke(st, x[1], y[1], x[2], y[2]);
+        apply_tool_stroke(st, x[2], y[2], x[0], y[0]);
+    } else {
+        /* The canvas is a bare pixel grid; wrap it so the shared
+           rasterizer can write into it. Clipping is per the canvas
+           dimensions, so corners dragged into the letterbox are cut. */
+        platform_framebuffer_t canvas_fb = {
+            .pixels = st->canvas, .width = st->canvas_w, .height = st->canvas_h,
+        };
+        draw2d_triangle_fill(&canvas_fb, x[0], y[0], x[1], y[1], x[2], y[2], st->color);
+    }
+    st->tri_n = 0;
 }
 
 static void canvas_clear(paint_state_t *st) {
@@ -219,9 +272,13 @@ static void canvas_clear(paint_state_t *st) {
 }
 
 static void set_tool(paint_state_t *st, paint_tool_t t) {
-    st->tool = t;
-    if (t == TOOL_PENCIL) printf("tool: pencil\n");
-    else                  printf("tool: %s (size %d)\n", tool_name(t), st->brush_size);
+    st->tool        = t;
+    st->line_active = false;      /* drop any half-placed shape */
+    st->tri_n       = 0;
+    if (t == TOOL_PENCIL)       printf("tool: pencil\n");
+    else if (tool_is_triangle(t)) printf("tool: %s (size %d) — click 3 corners, Esc cancels\n",
+                                         tool_name(t), st->brush_size);
+    else                        printf("tool: %s (size %d)\n", tool_name(t), st->brush_size);
 }
 
 static void set_brush_size(paint_state_t *st, int size) {
@@ -263,7 +320,8 @@ static void cleanup(app_mode_t *m) {
 static void leave(app_mode_t *m) {
     paint_state_t *st = m->state;
     st->painting    = false;          /* don't resume a stroke on re-enter */
-    st->line_active = false;          /* uncommitted line is dropped */
+    st->line_active = false;          /* uncommitted shapes are dropped */
+    st->tri_n       = 0;
 }
 
 static void event(app_mode_t *m, const platform_event_t *e) {
@@ -276,8 +334,11 @@ static void event(app_mode_t *m, const platform_event_t *e) {
         case PLATFORM_KEY_2: set_tool(st, TOOL_BRUSH);  break;
         case PLATFORM_KEY_3: set_tool(st, TOOL_ERASER); break;
         case PLATFORM_KEY_4: set_tool(st, TOOL_LINE);   break;
+        case PLATFORM_KEY_5: set_tool(st, TOOL_TRIANGLE);      break;
+        case PLATFORM_KEY_6: set_tool(st, TOOL_TRIANGLE_WIRE); break;
         case PLATFORM_KEY_ESCAPE:
             if (st->line_active) { st->line_active = false; printf("line cancelled\n"); }
+            if (st->tri_n)       { st->tri_n = 0;           printf("triangle cancelled\n"); }
             break;
         case PLATFORM_KEY_LEFT_BRACKET:  set_brush_size(st, st->brush_size - 1); break;
         case PLATFORM_KEY_RIGHT_BRACKET: set_brush_size(st, st->brush_size + 1); break;
@@ -292,7 +353,20 @@ static void event(app_mode_t *m, const platform_event_t *e) {
     case PLATFORM_EV_MOUSE_DOWN: {
         if (e->mouse.btn != PLATFORM_MOUSE_LEFT) break;
         int cx, cy;
-        if (!mouse_to_canvas(st, e->mouse.x, e->mouse.y, &cx, &cy)) break;
+        bool inside = mouse_to_canvas(st, e->mouse.x, e->mouse.y, &cx, &cy);
+
+        /* Corners may be placed anywhere, including the letterbox — the
+           rasterizer clips to the canvas on commit. */
+        if (tool_is_triangle(st->tool)) {
+            st->tri_x[st->tri_n] = cx;
+            st->tri_y[st->tri_n] = cy;
+            st->tri_n++;
+            if (st->tri_n == 3) triangle_commit(st);
+            else { st->tri_x[st->tri_n] = cx; st->tri_y[st->tri_n] = cy; }  /* seed live corner */
+            break;
+        }
+
+        if (!inside) break;
         if (st->tool == TOOL_LINE) {
             st->line_active = true;
             st->line_x0 = st->line_x1 = cx;
@@ -315,6 +389,12 @@ static void event(app_mode_t *m, const platform_event_t *e) {
         break;
 
     case PLATFORM_EV_MOUSE_MOVE: {
+        if (tool_is_triangle(st->tool)) {
+            if (st->tri_n > 0)
+                mouse_to_canvas(st, e->move.x, e->move.y,
+                                &st->tri_x[st->tri_n], &st->tri_y[st->tri_n]);
+            break;
+        }
         if (st->line_active) {
             mouse_to_canvas(st, e->move.x, e->move.y, &st->line_x1, &st->line_y1);
             break;
@@ -344,6 +424,7 @@ static void frame(app_mode_t *m, platform_framebuffer_t *fb) {
     paint_state_t *st = m->state;
     render_canvas(fb, st);
     if (st->line_active) render_line_preview(fb, st);
+    if (st->tri_n)       render_triangle_preview(fb, st);
 }
 
 static void set_color(app_mode_t *m, u32 argb) {
