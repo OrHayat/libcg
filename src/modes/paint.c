@@ -1,6 +1,7 @@
 #include "modes/paint.h"
 #include "render/draw2d.h"
 #include "render/framebuffer.h"
+#include "util/image.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -321,6 +322,56 @@ static void adjust_size(paint_state_t *st, int delta) {
     print_tool(st);
 }
 
+/* ---- file I/O ---- */
+
+static const char *const BMP_EXTS[] = { "bmp", NULL };
+
+/* Abandon any half-placed shape: the dialog eats the events that would
+   otherwise finish it, and a stroke resuming after a modal feels broken. */
+static void cancel_pending(paint_state_t *st) {
+    st->painting    = false;
+    st->line_active = false;
+    st->tri_n       = 0;
+}
+
+static void paint_save(paint_state_t *st) {
+    char path[1024];
+    cancel_pending(st);
+    if (!platform_save_dialog("canvas.bmp", BMP_EXTS, path, sizeof path)) {
+        printf("save cancelled\n");
+        return;
+    }
+    if (image_save_bmp(path, st->canvas, st->canvas_w, st->canvas_h))
+        printf("saved %dx%d to %s\n", st->canvas_w, st->canvas_h, path);
+    else
+        printf("save FAILED: %s\n", path);
+}
+
+/* The canvas takes on the loaded image's dimensions rather than scaling
+   the image into the existing one — the window is only a viewport, so a
+   larger image just letterboxes differently. */
+static void paint_open(paint_state_t *st) {
+    char path[1024];
+    cancel_pending(st);
+    if (!platform_open_dialog(BMP_EXTS, path, sizeof path)) {
+        printf("open cancelled\n");
+        return;
+    }
+
+    u32 *pixels = NULL;
+    int  w = 0, h = 0;
+    if (!image_load_bmp(path, &pixels, &w, &h)) {
+        printf("load FAILED (24/32-bit uncompressed BMP only): %s\n", path);
+        return;
+    }
+
+    free(st->canvas);
+    st->canvas   = pixels;
+    st->canvas_w = w;
+    st->canvas_h = h;
+    printf("loaded %dx%d from %s\n", w, h, path);
+}
+
 /* ---- mode callbacks ---- */
 
 static void init(app_mode_t *m) {
@@ -378,6 +429,8 @@ static void event(app_mode_t *m, const platform_event_t *e) {
             canvas_clear(st);
             printf("canvas cleared\n");
             break;
+        case PLATFORM_KEY_S: paint_save(st); break;
+        case PLATFORM_KEY_O: paint_open(st); break;
         default: break;
         }
         break;
