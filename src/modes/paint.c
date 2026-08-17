@@ -43,6 +43,20 @@ typedef struct {
        always has a live third point. The 3rd click commits and resets. */
     int          tri_n;
     int          tri_x[3], tri_y[3];
+
+    /* Stroke coverage mask, canvas-sized. Tools mark coverage here rather
+       than drawing onto the canvas, and the whole mask is composited in one
+       pass when the stroke finishes. Compositing per stamp instead would
+       apply the color once per overlapping stamp — a 5px brush overlaps
+       itself 5 times per pixel, turning a 25%-alpha stroke into 76%, and
+       making the result depend on how fast the mouse moved.
+
+       0 = untouched, 255 = covered. Binary today; u8 leaves room for
+       antialiased coverage later. The dirty rect is inclusive and bounds
+       every clear, composite and redraw, so a small stroke never costs a
+       full-canvas sweep. Empty is dirty_x1 < dirty_x0. */
+    u8  *stroke;
+    int  dirty_x0, dirty_y0, dirty_x1, dirty_y1;
 } paint_state_t;
 
 #define CANVAS_BG 0xFFFFFFFFu
@@ -62,23 +76,60 @@ static void canvas_offset(const platform_framebuffer_t *fb, const paint_state_t 
    every even size identical to the odd one below it, so half the [ / ]
    presses would change nothing on screen.
 
-   `color` is premultiplied and composited source-over, so alpha behaves as
-   paint opacity and the destination stays opaque. Writing the color in
-   directly would leave the canvas holding invalid premultiplied pixels (R
-   greater than A), which CoreGraphics clamps — turning translucent colors
-   dark instead of transparent. Overlapping stamps inside one stroke
-   composite more than once, so a translucent brush darkens where it crosses
-   itself; avoiding that needs a scratch layer per stroke. */
-static void stamp_square(u32 *pixels, int w, int h, int cx, int cy, int size, u32 color) {
+   Marks coverage only — the color is applied later, once, by
+   stroke_composite. */
+static void stamp_square(paint_state_t *st, int cx, int cy, int size) {
     int x0 = cx - (size - 1) / 2, x1 = x0 + size - 1;
     int y0 = cy - (size - 1) / 2, y1 = y0 + size - 1;
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
-    if (x1 >= w) x1 = w - 1;
-    if (y1 >= h) y1 = h - 1;
-    for (int y = y0; y <= y1; y++) {
-        u32 *row = &pixels[y * w];
-        for (int x = x0; x <= x1; x++) row[x] = color_blend(row[x], color);
+    if (x1 >= st->canvas_w) x1 = st->canvas_w - 1;
+    if (y1 >= st->canvas_h) y1 = st->canvas_h - 1;
+    if (x0 > x1 || y0 > y1) return;
+
+    for (int y = y0; y <= y1; y++)
+        memset(&st->stroke[(size_t)y * st->canvas_w + x0], 0xFF, (size_t)(x1 - x0 + 1));
+
+    if (x0 < st->dirty_x0) st->dirty_x0 = x0;
+    if (y0 < st->dirty_y0) st->dirty_y0 = y0;
+    if (x1 > st->dirty_x1) st->dirty_x1 = x1;
+    if (y1 > st->dirty_y1) st->dirty_y1 = y1;
+}
+
+static bool stroke_is_empty(const paint_state_t *st) {
+    return st->dirty_x1 < st->dirty_x0 || st->dirty_y1 < st->dirty_y0;
+}
+
+/* Drop the pending stroke, clearing only what was marked. */
+static void stroke_reset(paint_state_t *st) {
+    if (!stroke_is_empty(st)) {
+        size_t run = (size_t)(st->dirty_x1 - st->dirty_x0 + 1);
+        for (int y = st->dirty_y0; y <= st->dirty_y1; y++)
+            memset(&st->stroke[(size_t)y * st->canvas_w + st->dirty_x0], 0, run);
+    }
+    st->dirty_x0 = st->canvas_w;
+    st->dirty_y0 = st->canvas_h;
+    st->dirty_x1 = -1;
+    st->dirty_y1 = -1;
+}
+
+/* Blend `color` into `target` wherever the mask is set. (off_x, off_y) maps
+   canvas coordinates onto the target grid — zero for the canvas itself, the
+   letterbox offset when previewing into the framebuffer. */
+static void stroke_blit(const paint_state_t *st, u32 *target, int tw, int th,
+                        int off_x, int off_y, u32 color) {
+    if (stroke_is_empty(st)) return;
+    for (int y = st->dirty_y0; y <= st->dirty_y1; y++) {
+        int ty = y + off_y;
+        if (ty < 0 || ty >= th) continue;
+        const u8 *mask = &st->stroke[(size_t)y * st->canvas_w];
+        u32      *row  = &target[(size_t)ty * tw];
+        for (int x = st->dirty_x0; x <= st->dirty_x1; x++) {
+            if (!mask[x]) continue;
+            int tx = x + off_x;
+            if (tx < 0 || tx >= tw) continue;
+            row[tx] = color_blend(row[tx], color);
+        }
     }
 }
 
@@ -194,12 +245,23 @@ static void tool_footprint(const paint_state_t *st, u32 *color, int *size) {
     *color = color_premultiply(*color);
 }
 
-/* Apply current tool centered at canvas-pixel (cx, cy). Out-of-bounds
-   pixels in the footprint are clipped, not wrapped. */
+/* Mark the current tool's footprint at canvas-pixel (cx, cy). Out-of-bounds
+   pixels are clipped, not wrapped. */
 static void apply_tool_at(paint_state_t *st, int cx, int cy) {
     u32 color; int size;
     tool_footprint(st, &color, &size);
-    stamp_square(st->canvas, st->canvas_w, st->canvas_h, cx, cy, size, color);
+    (void)color;                      /* coverage now; stroke_composite applies it */
+    stamp_square(st, cx, cy, size);
+}
+
+/* Lay the finished stroke onto the canvas in a single composite, then clear
+   it. This is the one place a stroke's color reaches the canvas, so opacity
+   comes out as asked regardless of brush size or mouse speed. */
+static void stroke_composite(paint_state_t *st) {
+    u32 color; int size;
+    tool_footprint(st, &color, &size);
+    stroke_blit(st, st->canvas, st->canvas_w, st->canvas_h, 0, 0, color);
+    stroke_reset(st);
 }
 
 static void stamp_cb(int x, int y, void *ud) {
@@ -213,58 +275,45 @@ static void apply_tool_stroke(paint_state_t *st, int x0, int y0, int x1, int y1)
     draw2d_walk_line(x0, y0, x1, y1, stamp_cb, st);
 }
 
-/* Line-tool preview: stamp the footprint straight into the framebuffer
-   at canvas→fb offset, so the canvas itself is untouched until release. */
-typedef struct {
-    platform_framebuffer_t *fb;
-    int off_x, off_y;
-    int size;
-    u32 color;
-} preview_ctx_t;
-
-static void preview_cb(int x, int y, void *ud) {
-    preview_ctx_t *c = ud;
-    stamp_square(c->fb->pixels, c->fb->width, c->fb->height,
-                 x + c->off_x, y + c->off_y, c->size, c->color);
+/* Shapes are re-marked from scratch whenever their geometry changes, so the
+   mask always holds the current rubber-band. Because the preview draws from
+   the same mask that will be composited, what you see while dragging is
+   exactly what lands on the canvas. */
+static void line_remark(paint_state_t *st) {
+    stroke_reset(st);
+    draw2d_walk_line(st->line_x0, st->line_y0, st->line_x1, st->line_y1, stamp_cb, st);
 }
 
-static void preview_segment(platform_framebuffer_t *fb, const paint_state_t *st,
-                            int x0, int y0, int x1, int y1) {
-    preview_ctx_t c = { .fb = fb };
-    canvas_offset(fb, st, &c.off_x, &c.off_y);
-    tool_footprint(st, &c.color, &c.size);
-    draw2d_walk_line(x0, y0, x1, y1, preview_cb, &c);
-}
-
-static void render_line_preview(platform_framebuffer_t *fb, const paint_state_t *st) {
-    preview_segment(fb, st, st->line_x0, st->line_y0, st->line_x1, st->line_y1);
+static void triangle_remark(paint_state_t *st) {
+    stroke_reset(st);
+    const int *x = st->tri_x, *y = st->tri_y;
+    if (st->tri_n == 1) {
+        apply_tool_stroke(st, x[0], y[0], x[1], y[1]);
+    } else if (st->tri_n == 2) {
+        apply_tool_stroke(st, x[0], y[0], x[1], y[1]);
+        apply_tool_stroke(st, x[1], y[1], x[2], y[2]);
+        apply_tool_stroke(st, x[2], y[2], x[0], y[0]);
+    }
 }
 
 static void line_commit(paint_state_t *st) {
-    draw2d_walk_line(st->line_x0, st->line_y0, st->line_x1, st->line_y1, stamp_cb, st);
+    line_remark(st);
+    stroke_composite(st);
     st->line_active = false;
-}
-
-/* Outline preview for both triangle tools — the fill only appears on
-   commit, so an in-progress shape always reads as in-progress. */
-static void render_triangle_preview(platform_framebuffer_t *fb, const paint_state_t *st) {
-    const int *x = st->tri_x, *y = st->tri_y;
-    if (st->tri_n == 1) {
-        preview_segment(fb, st, x[0], y[0], x[1], y[1]);
-    } else if (st->tri_n == 2) {
-        preview_segment(fb, st, x[0], y[0], x[1], y[1]);
-        preview_segment(fb, st, x[1], y[1], x[2], y[2]);
-        preview_segment(fb, st, x[2], y[2], x[0], y[0]);
-    }
 }
 
 static void triangle_commit(paint_state_t *st) {
     const int *x = st->tri_x, *y = st->tri_y;
     if (st->tool == TOOL_TRIANGLE_WIRE) {
+        stroke_reset(st);
         apply_tool_stroke(st, x[0], y[0], x[1], y[1]);
         apply_tool_stroke(st, x[1], y[1], x[2], y[2]);
         apply_tool_stroke(st, x[2], y[2], x[0], y[0]);
+        stroke_composite(st);
     } else {
+        /* A filled triangle covers each pixel once already, so it can go
+           straight onto the canvas without the mask. */
+        stroke_reset(st);
         /* The canvas is a bare pixel grid; wrap it so the shared
            rasterizer can write into it. Clipping is per the canvas
            dimensions, so corners dragged into the letterbox are cut. */
@@ -342,6 +391,10 @@ static const char *const BMP_EXTS[] = { "bmp", NULL };
 /* Abandon any half-placed shape: the dialog eats the events that would
    otherwise finish it, and a stroke resuming after a modal feels broken. */
 static void cancel_pending(paint_state_t *st) {
+    /* A freehand stroke in progress is real work, so keep it; an unfinished
+       shape is just a rubber-band, so drop it. */
+    if (st->painting) stroke_composite(st);
+    else              stroke_reset(st);
     st->painting    = false;
     st->line_active = false;
     st->tri_n       = 0;
@@ -385,10 +438,21 @@ static void paint_open(paint_state_t *st) {
     for (size_t i = 0, n = (size_t)w * (size_t)h; i < n; i++)
         pixels[i] = color_blend(CANVAS_BG, pixels[i]);
 
+    /* The mask is canvas-sized, so a differently-sized image needs a new one. */
+    u8 *mask = calloc((size_t)w * (size_t)h, sizeof(u8));
+    if (!mask) {
+        free(pixels);
+        printf("load FAILED (out of memory): %s\n", path);
+        return;
+    }
+
     free(st->canvas);
+    free(st->stroke);
     st->canvas   = pixels;
+    st->stroke   = mask;
     st->canvas_w = w;
     st->canvas_h = h;
+    stroke_reset(st);
     printf("loaded %dx%d from %s\n", w, h, path);
 }
 
@@ -408,7 +472,9 @@ static void init(app_mode_t *m) {
     st->canvas_w = fb0->width;
     st->canvas_h = fb0->height;
     st->canvas   = malloc((size_t)st->canvas_w * (size_t)st->canvas_h * sizeof(u32));
+    st->stroke   = calloc((size_t)st->canvas_w * (size_t)st->canvas_h, sizeof(u8));
     canvas_clear(st);
+    stroke_reset(st);                 /* seeds the empty dirty rect */
 
     m->state = st;
 }
@@ -416,15 +482,13 @@ static void init(app_mode_t *m) {
 static void cleanup(app_mode_t *m) {
     paint_state_t *st = m->state;
     free(st->canvas);
+    free(st->stroke);
     free(st);
     m->state = NULL;
 }
 
 static void leave(app_mode_t *m) {
-    paint_state_t *st = m->state;
-    st->painting    = false;          /* don't resume a stroke on re-enter */
-    st->line_active = false;          /* uncommitted shapes are dropped */
-    st->tri_n       = 0;
+    cancel_pending(m->state);         /* don't resume a stroke on re-enter */
 }
 
 static void event(app_mode_t *m, const platform_event_t *e) {
@@ -442,6 +506,7 @@ static void event(app_mode_t *m, const platform_event_t *e) {
         case PLATFORM_KEY_ESCAPE:
             if (st->line_active) { st->line_active = false; printf("line cancelled\n"); }
             if (st->tri_n)       { st->tri_n = 0;           printf("triangle cancelled\n"); }
+            stroke_reset(st);          /* discard the uncommitted preview */
             break;
         case PLATFORM_KEY_LEFT_BRACKET:  adjust_size(st, -1); break;
         case PLATFORM_KEY_RIGHT_BRACKET: adjust_size(st, +1); break;
@@ -466,8 +531,13 @@ static void event(app_mode_t *m, const platform_event_t *e) {
             st->tri_x[st->tri_n] = cx;
             st->tri_y[st->tri_n] = cy;
             st->tri_n++;
-            if (st->tri_n == 3) triangle_commit(st);
-            else { st->tri_x[st->tri_n] = cx; st->tri_y[st->tri_n] = cy; }  /* seed live corner */
+            if (st->tri_n == 3) {
+                triangle_commit(st);
+            } else {
+                st->tri_x[st->tri_n] = cx;   /* seed live corner */
+                st->tri_y[st->tri_n] = cy;
+                triangle_remark(st);
+            }
             break;
         }
 
@@ -476,11 +546,13 @@ static void event(app_mode_t *m, const platform_event_t *e) {
             st->line_active = true;
             st->line_x0 = st->line_x1 = cx;
             st->line_y0 = st->line_y1 = cy;
+            line_remark(st);
             break;
         }
         st->painting = true;
         st->last_cx  = cx;
         st->last_cy  = cy;
+        stroke_reset(st);              /* one mask per freehand stroke */
         apply_tool_at(st, cx, cy);
     } break;
 
@@ -489,19 +561,24 @@ static void event(app_mode_t *m, const platform_event_t *e) {
         if (st->line_active) {
             mouse_to_canvas(st, e->mouse.x, e->mouse.y, &st->line_x1, &st->line_y1);
             line_commit(st);
+        } else if (st->painting) {
+            stroke_composite(st);      /* the stroke reaches the canvas here */
         }
         st->painting = false;
         break;
 
     case PLATFORM_EV_MOUSE_MOVE: {
         if (tool_is_triangle(st->tool)) {
-            if (st->tri_n > 0)
+            if (st->tri_n > 0) {
                 mouse_to_canvas(st, e->move.x, e->move.y,
                                 &st->tri_x[st->tri_n], &st->tri_y[st->tri_n]);
+                triangle_remark(st);
+            }
             break;
         }
         if (st->line_active) {
             mouse_to_canvas(st, e->move.x, e->move.y, &st->line_x1, &st->line_y1);
+            line_remark(st);
             break;
         }
         if (!st->painting) break;
@@ -528,8 +605,17 @@ static void event(app_mode_t *m, const platform_event_t *e) {
 static void frame(app_mode_t *m, platform_framebuffer_t *fb) {
     paint_state_t *st = m->state;
     render_canvas(fb, st);
-    if (st->line_active) render_line_preview(fb, st);
-    if (st->tri_n)       render_triangle_preview(fb, st);
+
+    /* The pending stroke lives only in the mask until it is composited, so
+       draw it over the canvas to show it in progress. Same mask, same
+       single blend — the preview matches the final result exactly. */
+    if (!stroke_is_empty(st)) {
+        int off_x, off_y;
+        canvas_offset(fb, st, &off_x, &off_y);
+        u32 color; int size;
+        tool_footprint(st, &color, &size);
+        stroke_blit(st, fb->pixels, fb->width, fb->height, off_x, off_y, color);
+    }
 }
 
 static void set_color(app_mode_t *m, u32 argb) {
