@@ -8,7 +8,8 @@
      5 triangle (filled)          6 triangle (outline)
      [ / ] width 1..32 (1 = pencil, 2+ = brush; steps across the two)
      C clear      S save BMP      O open BMP
-     # (shell) sets the color
+     # (shell) sets the color; its alpha is paint opacity, so #ff000040
+     lays down a faint red rather than punching a transparent hole
    Pencil/brush/eraser paint on drag; line is press-drag-release;
    triangles are three clicks. Esc cancels a shape in progress.
    Canvas is allocated at the startup framebuffer size and survives
