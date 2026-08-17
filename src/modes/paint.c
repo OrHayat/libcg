@@ -411,7 +411,7 @@ static void event(app_mode_t *m, const platform_event_t *e) {
     paint_state_t *st = m->state;
     switch (e->kind) {
     case PLATFORM_EV_KEY_DOWN:
-        if (e->key.repeat) break;
+        if (e->key.repeat || !platform_key_is_plain(e)) break;
         switch (e->key.key) {
         case PLATFORM_KEY_1: set_tool(st, TOOL_PENCIL); break;
         case PLATFORM_KEY_2: set_tool(st, TOOL_BRUSH);  break;
