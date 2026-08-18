@@ -2,6 +2,7 @@
 #define DRAW2D_H
 
 #include "platform/platform.h"
+#include "render/color.h"
 
 /* 2D primitives in screen space. Integer pixel coordinates, top-left
    origin. Everything is clipped to the framebuffer bounds. */
@@ -15,11 +16,11 @@ typedef void (*draw2d_pixel_fn)(int x, int y, void *user_data);
 void draw2d_walk_line(int x0, int y0, int x1, int y1, draw2d_pixel_fn fn, void *user_data);
 
 /* 1px line, endpoints inclusive, clipped per-pixel to fb. */
-void draw2d_line(platform_framebuffer_t *fb, int x0, int y0, int x1, int y1, uint32_t color);
+void draw2d_line(platform_framebuffer_t *fb, int x0, int y0, int x1, int y1, pcolor_t color);
 
 /* Triangle outline: three draw2d_line calls. */
 void draw2d_triangle_wire(platform_framebuffer_t *fb,
-                          int x0, int y0, int x1, int y1, int x2, int y2, uint32_t color);
+                          int x0, int y0, int x1, int y1, int x2, int y2, pcolor_t color);
 
 /* Solid triangle via edge functions over the bounding box.
    Winding-agnostic (vertices are reordered internally to positive area),
@@ -28,12 +29,14 @@ void draw2d_triangle_wire(platform_framebuffer_t *fb,
    values computed per pixel are the unnormalized barycentric weights that
    later phases interpolate depth / color / UV with. */
 void draw2d_triangle_fill(platform_framebuffer_t *fb,
-                          int x0, int y0, int x1, int y1, int x2, int y2, uint32_t color);
+                          int x0, int y0, int x1, int y1, int x2, int y2, pcolor_t color);
 
-/* Same coverage, but source-over blends instead of replacing. `color` must
-   already be premultiplied, as must the destination. */
+/* Same coverage, but source-over blends instead of replacing. Use this
+   whenever the colour may be translucent: the plain fill above writes the
+   premultiplied value straight in, which replaces the background rather
+   than showing through it. */
 void draw2d_triangle_fill_blend(platform_framebuffer_t *fb,
                                 int x0, int y0, int x1, int y1, int x2, int y2,
-                                uint32_t premul_color);
+                                pcolor_t color);
 
 #endif /* DRAW2D_H */

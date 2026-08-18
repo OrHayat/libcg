@@ -2,6 +2,7 @@
 #define COLOR_INPUT_H
 
 #include "platform/platform.h"
+#include "render/color.h"
 #include "util/common.h"
 
 /* '#'-triggered hex color entry on stdout. The caller detects the '#'
@@ -17,8 +18,8 @@ typedef struct {
 void color_input_begin(color_input_t *ci);
 
 /* Consumes one event. Returns true exactly when Enter completed a valid
-   color, which is written to *out (straight ARGB). Enter and Esc both
+   color, which is written to *out (straight, unpremultiplied). Enter and Esc both
    clear `active`. */
-bool color_input_event(color_input_t *ci, const platform_event_t *e, u32 *out);
+bool color_input_event(color_input_t *ci, const platform_event_t *e, color_t *out);
 
 #endif /* COLOR_INPUT_H */

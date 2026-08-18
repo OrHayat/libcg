@@ -22,12 +22,12 @@ static bool tool_is_triangle(paint_tool_t t) {
 
 typedef struct {
     /* fixed-size canvas that survives window resizes */
-    u32 *canvas;
+    pcolor_t *canvas;
     int  canvas_w, canvas_h;
 
     paint_tool_t tool;              /* default TOOL_PENCIL */
     int          brush_size;        /* 1..32, default 5 */
-    u32          color;             /* straight ARGB from the shell's # input */
+    color_t      color;             /* straight, from the shell's # input */
     bool         painting;          /* mouse held during a stroke */
     int          last_cx, last_cy;  /* prev stroke point in canvas coords; -1 = none */
 
@@ -59,7 +59,7 @@ typedef struct {
     int  dirty_x0, dirty_y0, dirty_x1, dirty_y1;
 } paint_state_t;
 
-#define CANVAS_BG 0xFFFFFFFFu
+#define CANVAS_BG PCOLOR_RGB(0xFF, 0xFF, 0xFF)
 
 /* Letterbox offset of the canvas inside the framebuffer. Single source
    of truth — render, hit-testing and the line preview all use it, so
@@ -116,14 +116,14 @@ static void stroke_reset(paint_state_t *st) {
 /* Blend `color` into `target` wherever the mask is set. (off_x, off_y) maps
    canvas coordinates onto the target grid — zero for the canvas itself, the
    letterbox offset when previewing into the framebuffer. */
-static void stroke_blit(const paint_state_t *st, u32 *target, int tw, int th,
-                        int off_x, int off_y, u32 color) {
+static void stroke_blit(const paint_state_t *st, pcolor_t *target, int tw, int th,
+                        int off_x, int off_y, pcolor_t color) {
     if (stroke_is_empty(st)) return;
     for (int y = st->dirty_y0; y <= st->dirty_y1; y++) {
         int ty = y + off_y;
         if (ty < 0 || ty >= th) continue;
         const u8 *mask = &st->stroke[(size_t)y * st->canvas_w];
-        u32      *row  = &target[(size_t)ty * tw];
+        pcolor_t *row  = &target[(size_t)ty * tw];
         for (int x = st->dirty_x0; x <= st->dirty_x1; x++) {
             if (!mask[x]) continue;
             int tx = x + off_x;
@@ -140,10 +140,11 @@ static void stroke_blit(const paint_state_t *st, u32 *target, int tw, int th,
    so the cursor lands exactly on the painted pixel. */
 
 static void render_canvas(platform_framebuffer_t *fb, const paint_state_t *st) {
-    const u32 *canvas = st->canvas;
+    const pcolor_t *canvas = st->canvas;
+    pcolor_t       *fbpx   = pcolor_pixels(fb->pixels);
     int canvas_w = st->canvas_w, canvas_h = st->canvas_h;
 
-    framebuffer_clear(fb, RGB(48, 48, 48));
+    framebuffer_clear(fb, PCOLOR_RGB(48, 48, 48));
     if (!canvas) return;
 
     int off_x, off_y;
@@ -158,9 +159,9 @@ static void render_canvas(platform_framebuffer_t *fb, const paint_state_t *st) {
     if (dst_x0 >= dst_x1 || dst_y0 >= dst_y1) return;
 
     int src_x = dst_x0 - off_x;
-    size_t row_bytes = (size_t)(dst_x1 - dst_x0) * sizeof(u32);
+    size_t row_bytes = (size_t)(dst_x1 - dst_x0) * sizeof *canvas;
     for (int y = dst_y0; y < dst_y1; y++) {
-        memcpy(&fb->pixels[y * fb->width + dst_x0],
+        memcpy(&fbpx[y * fb->width + dst_x0],
                &canvas[(y - off_y) * canvas_w + src_x],
                row_bytes);
     }
@@ -181,19 +182,19 @@ static void render_canvas(platform_framebuffer_t *fb, const paint_state_t *st) {
 
     if (top >= 0 && top < fb->height) {
         for (int x = hx0; x <= hx1; x++)
-            fb->pixels[top * fb->width + x] = RGB(0, 0, 0);
+            fbpx[top * fb->width + x] = PCOLOR_RGB(0, 0, 0);
     }
     if (bot >= 0 && bot < fb->height) {
         for (int x = hx0; x <= hx1; x++)
-            fb->pixels[bot * fb->width + x] = RGB(0, 0, 0);
+            fbpx[bot * fb->width + x] = PCOLOR_RGB(0, 0, 0);
     }
     if (left >= 0 && left < fb->width) {
         for (int y = vy0; y <= vy1; y++)
-            fb->pixels[y * fb->width + left] = RGB(0, 0, 0);
+            fbpx[y * fb->width + left] = PCOLOR_RGB(0, 0, 0);
     }
     if (right >= 0 && right < fb->width) {
         for (int y = vy0; y <= vy1; y++)
-            fb->pixels[y * fb->width + right] = RGB(0, 0, 0);
+            fbpx[y * fb->width + right] = PCOLOR_RGB(0, 0, 0);
     }
 }
 
@@ -235,20 +236,19 @@ static bool mouse_to_canvas(const paint_state_t *st, int mouse_x, int mouse_y,
 /* Footprint of the current tool: the premultiplied color it lays down and
    how many pixels across. Pencil is fixed at 1px; every other tool tracks
    brush_size. */
-static void tool_footprint(const paint_state_t *st, u32 *color, int *size) {
+static void tool_footprint(const paint_state_t *st, pcolor_t *color, int *size) {
     switch (st->tool) {
-    case TOOL_PENCIL: *color = st->color; *size = 1;              break;
+    case TOOL_PENCIL: *color = color_premultiply(st->color); *size = 1;              break;
     /* Opaque white, so compositing the eraser is a plain replace. */
-    case TOOL_ERASER: *color = CANVAS_BG; *size = st->brush_size; break;
-    default:          *color = st->color; *size = st->brush_size; break;
+    case TOOL_ERASER: *color = CANVAS_BG;                    *size = st->brush_size; break;
+    default:          *color = color_premultiply(st->color); *size = st->brush_size; break;
     }
-    *color = color_premultiply(*color);
 }
 
 /* Mark the current tool's footprint at canvas-pixel (cx, cy). Out-of-bounds
    pixels are clipped, not wrapped. */
 static void apply_tool_at(paint_state_t *st, int cx, int cy) {
-    u32 color; int size;
+    pcolor_t color; int size;
     tool_footprint(st, &color, &size);
     (void)color;                      /* coverage now; stroke_composite applies it */
     stamp_square(st, cx, cy, size);
@@ -258,7 +258,7 @@ static void apply_tool_at(paint_state_t *st, int cx, int cy) {
    it. This is the one place a stroke's color reaches the canvas, so opacity
    comes out as asked regardless of brush size or mouse speed. */
 static void stroke_composite(paint_state_t *st) {
-    u32 color; int size;
+    pcolor_t color; int size;
     tool_footprint(st, &color, &size);
     stroke_blit(st, st->canvas, st->canvas_w, st->canvas_h, 0, 0, color);
     stroke_reset(st);
@@ -318,7 +318,10 @@ static void triangle_commit(paint_state_t *st) {
            rasterizer can write into it. Clipping is per the canvas
            dimensions, so corners dragged into the letterbox are cut. */
         platform_framebuffer_t canvas_fb = {
-            .pixels = st->canvas, .width = st->canvas_w, .height = st->canvas_h,
+            /* platform.h knows nothing of pcolor_t, so hand it the raw
+               buffer; the rasterizer views it back as pcolor_t. */
+            .pixels = (u32 *)st->canvas,
+            .width = st->canvas_w, .height = st->canvas_h,
         };
         draw2d_triangle_fill_blend(&canvas_fb, x[0], y[0], x[1], y[1], x[2], y[2],
                                    color_premultiply(st->color));
@@ -424,7 +427,7 @@ static void paint_open(paint_state_t *st) {
         return;
     }
 
-    u32 *pixels = NULL;
+    pcolor_t *pixels = NULL;
     int  w = 0, h = 0;
     if (!image_load_bmp(path, &pixels, &w, &h)) {
         printf("load FAILED (24/32-bit uncompressed BMP only): %s\n", path);
@@ -462,7 +465,7 @@ static void init(app_mode_t *m) {
     paint_state_t *st = calloc(1, sizeof *st);
     st->tool       = TOOL_PENCIL;
     st->brush_size = 5;
-    st->color      = 0xFFFF8800;         /* default orange */
+    st->color      = COLOR_RGB(0xFF, 0x88, 0x00);   /* default orange */
     st->last_cx    = -1;
     st->last_cy    = -1;
 
@@ -471,7 +474,7 @@ static void init(app_mode_t *m) {
     platform_framebuffer_t *fb0 = platform_get_framebuffer();
     st->canvas_w = fb0->width;
     st->canvas_h = fb0->height;
-    st->canvas   = malloc((size_t)st->canvas_w * (size_t)st->canvas_h * sizeof(u32));
+    st->canvas   = malloc((size_t)st->canvas_w * (size_t)st->canvas_h * sizeof *st->canvas);
     st->stroke   = calloc((size_t)st->canvas_w * (size_t)st->canvas_h, sizeof(u8));
     canvas_clear(st);
     stroke_reset(st);                 /* seeds the empty dirty rect */
@@ -612,16 +615,17 @@ static void frame(app_mode_t *m, platform_framebuffer_t *fb) {
     if (!stroke_is_empty(st)) {
         int off_x, off_y;
         canvas_offset(fb, st, &off_x, &off_y);
-        u32 color; int size;
+        pcolor_t color; int size;
         tool_footprint(st, &color, &size);
-        stroke_blit(st, fb->pixels, fb->width, fb->height, off_x, off_y, color);
+        stroke_blit(st, pcolor_pixels(fb->pixels), fb->width, fb->height,
+                    off_x, off_y, color);
     }
 }
 
-static void set_color(app_mode_t *m, u32 argb) {
+static void set_color(app_mode_t *m, color_t c) {
     paint_state_t *st = m->state;
-    st->color = argb;
-    printf("paint color: 0x%08X\n", argb);
+    st->color = c;
+    printf("paint color: 0x%08X\n", c.rgba);
 }
 
 app_mode_t paint_mode(void) {

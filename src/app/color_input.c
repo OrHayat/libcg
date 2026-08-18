@@ -21,7 +21,7 @@ void color_input_begin(color_input_t *ci) {
     fflush(stdout);
 }
 
-bool color_input_event(color_input_t *ci, const platform_event_t *e, u32 *out) {
+bool color_input_event(color_input_t *ci, const platform_event_t *e, color_t *out) {
     switch (e->kind) {
     case PLATFORM_EV_KEY_DOWN:
         if (e->key.key == PLATFORM_KEY_BACKSPACE && ci->len > 0) {
@@ -29,7 +29,7 @@ bool color_input_event(color_input_t *ci, const platform_event_t *e, u32 *out) {
             echo(ci);
         } else if (e->key.key == PLATFORM_KEY_ENTER && !e->key.repeat) {
             bool ok = color_parse_hex(ci->buf, ci->len, out);
-            if (ok) printf("\ncolor applied: #%s -> 0x%08X\n", ci->buf, *out);
+            if (ok) printf("\ncolor applied: #%s -> 0x%08X\n", ci->buf, out->rgba);
             else    printf("\r\x1b[K#%s is not valid format\n", ci->buf);
             reset(ci);
             return ok;

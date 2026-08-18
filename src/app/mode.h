@@ -2,6 +2,7 @@
 #define MODE_H
 
 #include "platform/platform.h"
+#include "render/color.h"
 #include "util/common.h"
 
 /* ============================================================
@@ -33,7 +34,7 @@ struct app_mode {
     void (*leave)    (app_mode_t *m);
     void (*event)    (app_mode_t *m, const platform_event_t *e);
     void (*frame)    (app_mode_t *m, platform_framebuffer_t *fb);   /* required */
-    void (*set_color)(app_mode_t *m, u32 argb);                     /* straight (unpremultiplied) ARGB */
+    void (*set_color)(app_mode_t *m, color_t c);                     /* straight, unpremultiplied */
 };
 
 #endif /* MODE_H */

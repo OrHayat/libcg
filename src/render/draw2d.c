@@ -25,7 +25,7 @@ void draw2d_walk_line(int x0, int y0, int x1, int y1, draw2d_pixel_fn fn, void *
 
 typedef struct {
     platform_framebuffer_t *fb;
-    uint32_t                color;
+    pcolor_t                color;
 } line_ctx_t;
 
 static void put_pixel(int x, int y, void *ud) {
@@ -38,13 +38,13 @@ static void put_pixel(int x, int y, void *ud) {
    projections), so mostly-offscreen lines are rare and the walk cost
    is bounded by max(|dx|,|dy|). Proper Cohen-Sutherland is a follow-up
    if that stops being true. */
-void draw2d_line(platform_framebuffer_t *fb, int x0, int y0, int x1, int y1, uint32_t color) {
+void draw2d_line(platform_framebuffer_t *fb, int x0, int y0, int x1, int y1, pcolor_t color) {
     line_ctx_t c = { .fb = fb, .color = color };
     draw2d_walk_line(x0, y0, x1, y1, put_pixel, &c);
 }
 
 void draw2d_triangle_wire(platform_framebuffer_t *fb,
-                          int x0, int y0, int x1, int y1, int x2, int y2, uint32_t color) {
+                          int x0, int y0, int x1, int y1, int x2, int y2, pcolor_t color) {
     draw2d_line(fb, x0, y0, x1, y1, color);
     draw2d_line(fb, x1, y1, x2, y2, color);
     draw2d_line(fb, x2, y2, x0, y0, color);
@@ -71,7 +71,7 @@ static int imax3(int a, int b, int c) { int m = a > b ? a : b; return m > c ? m 
 
 static void triangle_fill_impl(platform_framebuffer_t *fb,
                                int x0, int y0, int x1, int y1, int x2, int y2,
-                               uint32_t color, bool blend) {
+                               pcolor_t color, bool blend) {
     int area = edge(x0, y0, x1, y1, x2, y2);
     if (area == 0) return;                      /* degenerate: no pixels */
     if (area < 0) {                             /* normalize to positive winding */
@@ -113,7 +113,7 @@ static void triangle_fill_impl(platform_framebuffer_t *fb,
        translation unit the compiler has to reload fb->pixels and fb->width
        after every pixel it writes. Those reloads, not the edge math,
        dominated the loop. */
-    uint32_t *pixels = fb->pixels;
+    pcolor_t *pixels = pcolor_pixels(fb->pixels);
     int       stride = fb->width;
 
     /* The blend test is hoisted out of the loop rather than sitting in it.
@@ -124,7 +124,7 @@ static void triangle_fill_impl(platform_framebuffer_t *fb,
     if (blend) {
         for (int y = miny; y <= maxy; y++) {
             int w0 = row0, w1 = row1, w2 = row2;
-            uint32_t *px = &pixels[(size_t)y * (size_t)stride];
+            pcolor_t *px = &pixels[(size_t)y * (size_t)stride];
             for (int x = minx; x <= maxx; x++) {
                 if ((w0 | w1 | w2) >= 0)        /* all three non-negative */
                     px[x] = color_blend(px[x], color);
@@ -135,7 +135,7 @@ static void triangle_fill_impl(platform_framebuffer_t *fb,
     } else {
         for (int y = miny; y <= maxy; y++) {
             int w0 = row0, w1 = row1, w2 = row2;
-            uint32_t *px = &pixels[(size_t)y * (size_t)stride];
+            pcolor_t *px = &pixels[(size_t)y * (size_t)stride];
             for (int x = minx; x <= maxx; x++) {
                 if ((w0 | w1 | w2) >= 0)
                     px[x] = color;
@@ -147,12 +147,12 @@ static void triangle_fill_impl(platform_framebuffer_t *fb,
 }
 
 void draw2d_triangle_fill(platform_framebuffer_t *fb,
-                          int x0, int y0, int x1, int y1, int x2, int y2, uint32_t color) {
+                          int x0, int y0, int x1, int y1, int x2, int y2, pcolor_t color) {
     triangle_fill_impl(fb, x0, y0, x1, y1, x2, y2, color, false);
 }
 
 void draw2d_triangle_fill_blend(platform_framebuffer_t *fb,
                                 int x0, int y0, int x1, int y1, int x2, int y2,
-                                uint32_t premul_color) {
-    triangle_fill_impl(fb, x0, y0, x1, y1, x2, y2, premul_color, true);
+                                pcolor_t color) {
+    triangle_fill_impl(fb, x0, y0, x1, y1, x2, y2, color, true);
 }

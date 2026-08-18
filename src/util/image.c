@@ -31,7 +31,7 @@ static u32 get_u32(const u8 *p) {
 #define BMP_FILE_HEADER 14
 #define BMP_INFO_HEADER 40
 
-bool image_save_bmp(const char *path, const u32 *pixels, int w, int h) {
+bool image_save_bmp(const char *path, const pcolor_t *pixels, int w, int h) {
     if (!path || !pixels || w <= 0 || h <= 0) return false;
 
     /* Every row starts on a 4-byte boundary; at 3 bytes per pixel that
@@ -68,12 +68,11 @@ bool image_save_bmp(const char *path, const u32 *pixels, int w, int h) {
     bool ok = fwrite(hdr, sizeof hdr, 1, f) == 1;
     /* BMP's first stored row is the image's bottom row. */
     for (int y = h - 1; y >= 0 && ok; y--) {
-        const u32 *src = &pixels[(size_t)y * (size_t)w];
+        const pcolor_t *src = &pixels[(size_t)y * (size_t)w];
         for (int x = 0; x < w; x++) {
-            u32 p = src[x];
-            row[x * 3 + 0] = (u8)( p        & 0xFF);      /* B */
-            row[x * 3 + 1] = (u8)((p >>  8) & 0xFF);      /* G */
-            row[x * 3 + 2] = (u8)((p >> 16) & 0xFF);      /* R */
+            row[x * 3 + 0] = src[x].b;
+            row[x * 3 + 1] = src[x].g;
+            row[x * 3 + 2] = src[x].r;
         }
         ok = fwrite(row, stride, 1, f) == 1;
     }
@@ -118,7 +117,7 @@ static u32 read_px(const u8 *p, size_t bytes) {
 
 #define BMP_INFO_HEADER_MAX 124   /* BITMAPV5HEADER */
 
-bool image_load_bmp(const char *path, u32 **out_pixels, int *out_w, int *out_h) {
+bool image_load_bmp(const char *path, pcolor_t **out_pixels, int *out_w, int *out_h) {
     if (!path || !out_pixels || !out_w || !out_h) return false;
 
     FILE *f = fopen(path, "rb");
@@ -215,7 +214,7 @@ bool image_load_bmp(const char *path, u32 **out_pixels, int *out_w, int *out_h) 
     size_t bytes_per_px = bpp / 8u;
     size_t stride       = (((size_t)width * bytes_per_px) + 3u) & ~(size_t)3;
 
-    u32 *pixels = malloc((size_t)width * (size_t)height * sizeof(u32));
+    pcolor_t *pixels = malloc((size_t)width * (size_t)height * sizeof *pixels);
     u8  *row    = malloc(stride);
     if (!pixels || !row) {
         free(pixels);
@@ -229,8 +228,8 @@ bool image_load_bmp(const char *path, u32 **out_pixels, int *out_w, int *out_h) 
         ok = fread(row, stride, 1, f) == 1;
         if (!ok) break;
 
-        int  y   = bottom_up ? height - 1 - i : i;
-        u32 *dst = &pixels[(size_t)y * (size_t)width];
+        int       y   = bottom_up ? height - 1 - i : i;
+        pcolor_t *dst = &pixels[(size_t)y * (size_t)width];
         for (int x = 0; x < width; x++) {
             u32 px = read_px(&row[(size_t)x * bytes_per_px], bytes_per_px);
             u8  r  = channel_extract(&cr, px);
@@ -239,7 +238,7 @@ bool image_load_bmp(const char *path, u32 **out_pixels, int *out_w, int *out_h) 
             u8  a  = ca.mask ? channel_extract(&ca, px) : 0xFF;
             /* Premultiply so the result can be blitted or blended straight
                into the framebuffer. */
-            dst[x] = color_premultiply(RGBA(r, g, b, a));
+            dst[x] = color_premultiply(COLOR_RGBA(r, g, b, a));
         }
     }
 

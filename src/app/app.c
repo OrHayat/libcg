@@ -87,7 +87,7 @@ static void on_event(const platform_event_t *e, void *ud) {
        cancels the entry (never exits fullscreen while typing). On a
        completed entry the color goes to the active mode. */
     if (a->color_input.active) {
-        u32 c;
+        color_t c;
         if (color_input_event(&a->color_input, e, &c)) {
             app_mode_t *m = active(a);
             if (m->set_color) m->set_color(m, c);
