@@ -1,12 +1,19 @@
 # Phase 7: Textures
 
+**Partially built.** `src/util/image.h/.c` already exists — paint mode's
+save/open pulled it in early. It reads 16/24/32-bit BMP (`BI_RGB` and
+`BI_BITFIELDS`, channel positions taken from the file's masks) and writes
+24-bit, producing premultiplied `0xAARRGGBB` in framebuffer layout. Still
+missing from this phase: TGA, the `texture_t` wrapper and sampling, UVs on
+meshes, and perspective-correct interpolation.
+
 ## Goal
 
 Load images, map onto triangles with perspective-correct interpolation.
 
 ## Files
 
-- `src/util/image.h/.c` — new (BMP/TGA loader)
+- `src/util/image.h/.c` — exists (BMP read/write); add TGA
 - `src/render/texture.h/.c` — new (texture struct, sampling)
 - `src/scene/mesh.h/.c` — modify (add UV coordinates)
 - `src/render/rasterizer.c` — modify (perspective-correct UV interpolation)
