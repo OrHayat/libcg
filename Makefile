@@ -1,5 +1,9 @@
 CC       = clang
-CFLAGS   = -std=c11 -Wall -Wextra -Wpedantic -O2 -Isrc
+# Pointer mismatches are errors, not warnings: color_t / pcolor_t already
+# reject by-value misuse, but a color_t* passed where pcolor_t* is expected
+# only warns by default, which would leave the premultiplied distinction
+# enforced for scalars and merely suggested for buffers.
+CFLAGS   = -std=c11 -Wall -Wextra -Wpedantic -Werror=incompatible-pointer-types -O2 -Isrc
 BUILD    = build
 
 UNAME_S := $(shell uname -s)
