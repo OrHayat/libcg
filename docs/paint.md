@@ -2,9 +2,9 @@
 
 **Status: built.** Off-roadmap — this is not one of the numbered phases.
 It exists as an exercise for `draw2d` and the platform layer, and it is
-what drove modifier reporting (#40), native file dialogs (#39) and the
-BMP loader (#42) into the platform and util layers. Nothing in phases
-3–9 depends on it.
+what drove modifier reporting (#40), native file dialogs (#39), the BMP
+loader (#42) and the [UI layer](ui.md) into the platform, util and ui
+layers. Nothing in phases 3–9 depends on it.
 
 ## Model
 
@@ -29,6 +29,13 @@ the image rather than scaling the image into the canvas.
 | `S` / `O` | Save / open BMP through the native dialog                    |
 | `Esc`     | Cancel a shape in progress                                   |
 | `#`       | (shell) set color — its alpha is opacity                     |
+
+Every one of those is also a button. The **Tools**, **Brush**, **Colors**
+and **Actions** panels dispatch the same commands the keys do — one table
+of bindings drives both, so nothing is reachable one way but not the
+other. Panels drag by their title bars, close by the `x`, and come back
+from the menu bar's `Panels` menu in the place they were left. See
+[ui](ui.md).
 
 `[` and `]` walk one continuous 1..32 ramp: width 1 *is* the pencil,
 2 and up is the brush, so stepping down past 2 selects the pencil rather

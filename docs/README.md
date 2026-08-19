@@ -12,6 +12,7 @@ land, the way phase 1 was.
 | [phase1](phase1.md)    | Window, framebuffer, events, app shell + modes           | built   |
 | [phase2](phase2.md)    | Lines and triangles in screen space                      | built   |
 | [paint](paint.md)      | Paint mode — off-roadmap exercise for the above          | built   |
+| [ui](ui.md)            | Widgets, panels and a bitmap font — off-roadmap          | built   |
 | [phase3](phase3.md)    | Math library: vec2/3/4, mat4, transforms                 | next    |
 | [phase4](phase4.md)    | 3D wireframe: MVP pipeline, camera                       | planned |
 | [phase5](phase5.md)    | Solid rendering: z-buffer, back-face culling             | planned |
@@ -31,6 +32,7 @@ src/app/          app shell: mode list, global keys, color-input overlay
 src/modes/        one file per interactive scene (pattern, paint)
 src/platform/     platform API + macOS Cocoa backend
 src/render/       framebuffer, color, draw2d
+src/ui/           bitmap font, immediate-mode widgets and panels
 src/util/         typedefs, BMP read/write
 src/debug/        stdout dumps of display info
 ```
