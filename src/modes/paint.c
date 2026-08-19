@@ -635,10 +635,10 @@ static void init(app_mode_t *m) {
     /* Stacked down the left edge with a gap between each, sized from the
        content they hold — a panel's height is its widgets, so these have
        to be spaced by hand rather than flowed. */
-    st->panel_tools   = (ui_panel_t){ .title = "Tools",   .x = 12 * s, .y = 12 * s,  .w = 68, .open = true };
-    st->panel_brush   = (ui_panel_t){ .title = "Brush",   .x = 12 * s, .y = 146 * s, .w = 68, .open = true };
-    st->panel_colors  = (ui_panel_t){ .title = "Colors",  .x = 12 * s, .y = 240 * s, .w = 68, .open = true };
-    st->panel_actions = (ui_panel_t){ .title = "Actions", .x = 12 * s, .y = 385 * s, .w = 68, .open = true };
+    st->panel_tools   = (ui_panel_t){ .title = "Tools",   .x = 12 * s, .y = 20 * s,  .w = 68, .open = true };
+    st->panel_brush   = (ui_panel_t){ .title = "Brush",   .x = 12 * s, .y = 152 * s, .w = 68, .open = true };
+    st->panel_colors  = (ui_panel_t){ .title = "Colors",  .x = 12 * s, .y = 244 * s, .w = 68, .open = true };
+    st->panel_actions = (ui_panel_t){ .title = "Actions", .x = 12 * s, .y = 387 * s, .w = 68, .open = true };
 
     m->state = st;
 }
@@ -800,6 +800,20 @@ static void draw_ui(paint_state_t *st, platform_framebuffer_t *fb) {
         group_buttons(st, GROUP_ACTION);
         ui_panel_end(ui);
     }
+
+    /* Last, so an open dropdown lands over the panels rather than under
+       them — and so a closed panel has a way back. */
+    ui_panel_t *panels[] = {
+        &st->panel_tools, &st->panel_brush, &st->panel_colors, &st->panel_actions,
+    };
+    ui_menubar_begin(ui);
+    if (ui_menu_begin(ui, "Panels", ARRAY_COUNT(panels))) {
+        for (int i = 0; i < ARRAY_COUNT(panels); i++)
+            if (ui_menu_item(ui, panels[i]->title, panels[i]->open))
+                panels[i]->open = !panels[i]->open;
+        ui_menu_end(ui);
+    }
+    ui_menubar_end(ui);
 
     ui_end_frame(ui);
 }

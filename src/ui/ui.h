@@ -64,6 +64,15 @@ typedef struct {
     /* Panels drawn last frame, for event-time hit testing. */
     ui_panel_t *seen[UI_MAX_PANELS];
     int   seen_count;
+
+    /* Menu bar. menu_open is retained for the same reason panel positions
+       are: a dropdown has to stay open across the frames between the click
+       that opened it and the click that picks an item. */
+    int   menubar_h;                 /* 0 when the frame drew no menu bar */
+    int   menubar_x;                 /* layout cursor along the strip */
+    ui_id menu_open;
+    int   menu_x, menu_y, menu_w, menu_h;   /* open dropdown, for hit testing */
+    int   menu_item;
 } ui_t;
 
 /* Feed every event here before the mode sees it. Returns true when the UI
@@ -81,6 +90,16 @@ void ui_end_frame(ui_t *ui);
 /* False when the panel is closed — skip its body. Panels nest never. */
 bool ui_panel_begin(ui_t *ui, ui_panel_t *p);
 void ui_panel_end(ui_t *ui);
+
+/* Menu bar across the top of the framebuffer. Draw it *after* the panels
+   so an open dropdown lands on top of them. `items` is the dropdown's row
+   count, needed up front because the background is drawn before the rows
+   that would otherwise measure it. */
+void ui_menubar_begin(ui_t *ui);
+void ui_menubar_end(ui_t *ui);
+bool ui_menu_begin(ui_t *ui, const char *label, int items);
+void ui_menu_end(ui_t *ui);
+bool ui_menu_item(ui_t *ui, const char *label, bool checked);
 
 void ui_label (ui_t *ui, const char *text);
 bool ui_button(ui_t *ui, const char *label, bool selected);
