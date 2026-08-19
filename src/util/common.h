@@ -16,6 +16,8 @@ typedef int64_t i64;
 typedef float f32;
 typedef double f64;
 
+#define ARRAY_COUNT(a) ((int)(sizeof(a) / sizeof((a)[0])))
+
 /* Pixel format: 0xAARRGGBB */
 #define RGB(r, g, b)     (0xFF000000u | ((u32)(u8)(r) << 16) | ((u32)(u8)(g) << 8) | (u32)(u8)(b))
 #define RGBA(r, g, b, a) (((u32)(u8)(a) << 24) | ((u32)(u8)(r) << 16) | ((u32)(u8)(g) << 8) | (u32)(u8)(b))

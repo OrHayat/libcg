@@ -469,6 +469,86 @@ static void paint_open(paint_state_t *st) {
     printf("loaded %dx%d from %s\n", w, h, path);
 }
 
+/* ---- commands ---- */
+
+/* Esc: drop a half-placed shape and the rubber-band preview it was
+   drawing. Distinct from cancel_pending(), which also commits a freehand
+   stroke that is already partly real. */
+static void cancel_shape(paint_state_t *st) {
+    if (st->line_active) { st->line_active = false; printf("line cancelled\n"); }
+    if (st->tri_n)       { st->tri_n = 0;           printf("triangle cancelled\n"); }
+    /* A freehand stroke has to end here too. Leaving painting set kept the
+       stroke live with its mask already discarded, so the next mouse move
+       resumed stamping from the stale st->last and drew a segment from
+       wherever the cursor sat at Esc. */
+    st->painting = false;
+    st->last     = vec2(-1, -1);
+    stroke_reset(st);              /* discard the uncommitted preview */
+}
+
+/* Every action the mode can perform, named once. Keys dispatch through
+   paint_exec and so will the toolbar, so an action can never end up
+   reachable one way but not the other. No CMD_COUNT and no default in the
+   switch below: -Wswitch then flags any command added without a body. */
+typedef enum {
+    CMD_TOOL_PENCIL,
+    CMD_TOOL_BRUSH,
+    CMD_TOOL_ERASER,
+    CMD_TOOL_LINE,
+    CMD_TOOL_TRIANGLE,
+    CMD_TOOL_TRIANGLE_WIRE,
+    CMD_SIZE_DEC,
+    CMD_SIZE_INC,
+    CMD_CANCEL,
+    CMD_CLEAR,
+    CMD_SAVE,
+    CMD_OPEN,
+} paint_cmd_t;
+
+typedef struct {
+    paint_cmd_t    cmd;
+    const char    *label;      /* button text once there is a toolbar */
+    platform_key_t key;
+    u32            mods;       /* OR of platform_mod_t; 0 = unmodified key */
+} paint_binding_t;
+
+/* Bindings as data, in the order a toolbar would lay them out. */
+static const paint_binding_t PAINT_COMMANDS[] = {
+    { CMD_TOOL_PENCIL,        "Pencil",   PLATFORM_KEY_1,             0 },
+    { CMD_TOOL_BRUSH,         "Brush",    PLATFORM_KEY_2,             0 },
+    { CMD_TOOL_ERASER,        "Eraser",   PLATFORM_KEY_3,             0 },
+    { CMD_TOOL_LINE,          "Line",     PLATFORM_KEY_4,             0 },
+    { CMD_TOOL_TRIANGLE,      "Triangle", PLATFORM_KEY_5,             0 },
+    { CMD_TOOL_TRIANGLE_WIRE, "Tri Wire", PLATFORM_KEY_6,             0 },
+    { CMD_SIZE_DEC,           "Smaller",  PLATFORM_KEY_LEFT_BRACKET,  0 },
+    { CMD_SIZE_INC,           "Bigger",   PLATFORM_KEY_RIGHT_BRACKET, 0 },
+    { CMD_CANCEL,             "Cancel",   PLATFORM_KEY_ESCAPE,        0 },
+    { CMD_CLEAR,              "Clear",    PLATFORM_KEY_C,             0 },
+    { CMD_SAVE,               "Save",     PLATFORM_KEY_S,             0 },
+    { CMD_OPEN,               "Open",     PLATFORM_KEY_O,             0 },
+};
+
+static void paint_exec(paint_state_t *st, paint_cmd_t cmd) {
+    switch (cmd) {
+    case CMD_TOOL_PENCIL:        set_tool(st, TOOL_PENCIL);        break;
+    case CMD_TOOL_BRUSH:         set_tool(st, TOOL_BRUSH);         break;
+    case CMD_TOOL_ERASER:        set_tool(st, TOOL_ERASER);        break;
+    case CMD_TOOL_LINE:          set_tool(st, TOOL_LINE);          break;
+    case CMD_TOOL_TRIANGLE:      set_tool(st, TOOL_TRIANGLE);      break;
+    case CMD_TOOL_TRIANGLE_WIRE: set_tool(st, TOOL_TRIANGLE_WIRE); break;
+    case CMD_SIZE_DEC:           adjust_size(st, -1);              break;
+    case CMD_SIZE_INC:           adjust_size(st, +1);              break;
+    case CMD_CANCEL:             cancel_shape(st);                 break;
+    /* cancel_pending first: without it the mask outlived the clear and
+       composited itself onto the fresh canvas on release, so "clear" left
+       a stroke behind. */
+    case CMD_CLEAR:              cancel_pending(st); canvas_clear(st);
+                                 printf("canvas cleared\n");     break;
+    case CMD_SAVE:               paint_save(st);                   break;
+    case CMD_OPEN:               paint_open(st);                   break;
+    }
+}
+
 /* ---- mode callbacks ---- */
 
 static void init(app_mode_t *m) {
@@ -507,38 +587,17 @@ static void event(app_mode_t *m, const platform_event_t *e) {
     paint_state_t *st = m->state;
     switch (e->kind) {
     case PLATFORM_EV_KEY_DOWN:
-        if (e->key.repeat || !platform_key_is_plain(e)) break;
-        switch (e->key.key) {
-        case PLATFORM_KEY_1: set_tool(st, TOOL_PENCIL); break;
-        case PLATFORM_KEY_2: set_tool(st, TOOL_BRUSH);  break;
-        case PLATFORM_KEY_3: set_tool(st, TOOL_ERASER); break;
-        case PLATFORM_KEY_4: set_tool(st, TOOL_LINE);   break;
-        case PLATFORM_KEY_5: set_tool(st, TOOL_TRIANGLE);      break;
-        case PLATFORM_KEY_6: set_tool(st, TOOL_TRIANGLE_WIRE); break;
-        case PLATFORM_KEY_ESCAPE:
-            if (st->line_active) { st->line_active = false; printf("line cancelled\n"); }
-            if (st->tri_n)       { st->tri_n = 0;           printf("triangle cancelled\n"); }
-            /* A freehand stroke has to end here too. Leaving painting set
-               kept the stroke live with its mask already discarded, so the
-               next mouse move resumed stamping from the stale st->last and
-               drew a segment from wherever the cursor sat at Esc. */
-            st->painting = false;
-            st->last     = vec2(-1, -1);
-            stroke_reset(st);          /* discard the uncommitted preview */
-            break;
-        case PLATFORM_KEY_LEFT_BRACKET:  adjust_size(st, -1); break;
-        case PLATFORM_KEY_RIGHT_BRACKET: adjust_size(st, +1); break;
-        case PLATFORM_KEY_C:
-            /* Ends the pending stroke first: without this the mask outlived
-               the clear and composited itself onto the fresh canvas on
-               release, so "clear" left a stroke behind. */
-            cancel_pending(st);
-            canvas_clear(st);
-            printf("canvas cleared\n");
-            break;
-        case PLATFORM_KEY_S: paint_save(st); break;
-        case PLATFORM_KEY_O: paint_open(st); break;
-        default: break;
+        if (e->key.repeat) break;
+        /* Mods must match exactly rather than as a subset. Every binding
+           is unmodified, so a modified press matches nothing — the same
+           guard platform_key_is_plain() gave, and what keeps Shift+3
+           ('#', the shell's colour input) from also picking the eraser. */
+        for (int i = 0; i < ARRAY_COUNT(PAINT_COMMANDS); i++) {
+            if (e->key.key == PAINT_COMMANDS[i].key &&
+                e->key.mods == PAINT_COMMANDS[i].mods) {
+                paint_exec(st, PAINT_COMMANDS[i].cmd);
+                break;
+            }
         }
         break;
 
