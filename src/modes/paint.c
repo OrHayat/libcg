@@ -606,6 +606,62 @@ static void paint_exec(paint_state_t *st, paint_cmd_t cmd) {
     }
 }
 
+/* ---- UI layout ---- */
+
+/* The last panel's y plus its height, in the design units the positions
+   below use. Adjacent to them so the two cannot drift apart. */
+#define PANEL_COLUMN_BOTTOM 480
+
+/* Both UI scales follow the DISPLAY THE WINDOW IS ON, so they are derived
+   here and re-derived on every resize rather than captured once at init.
+
+   Captured once, they go stale the moment the window is dragged to a
+   screen with a different backing scale. The widgets keeping their old
+   size is the visible half; the damaging half is device_scale, which
+   converts the mouse points the platform reports into the framebuffer
+   pixels the widgets occupy. Stale by a factor of two, a click on the
+   second button in a panel selects the sixth.
+
+   device_scale is the floor for the widget size, not the whole story:
+   matching it exactly makes the UI physically the size it would be on a
+   1x display, which on a dense screen is a 68pt column of 8pt text. Every
+   metric is an integer multiple of a bitmap grid, so "bigger" means the
+   next whole step up, and the ceiling is the bottom panel staying on
+   screen. */
+/* Position and size only. `open` and `last_h` are deliberately untouched:
+   a relayout must not reopen a panel the user closed. */
+static void place_panel(ui_panel_t *p, const char *title, int x, int y) {
+    p->title = title;
+    p->pos   = vec2(x, y);
+    p->w     = 68;
+}
+
+static void relayout_ui(paint_state_t *st, int fb_h, int device_scale) {
+    if (device_scale < 1) device_scale = 1;
+
+    int s = device_scale;
+    while ((s + 1) * PANEL_COLUMN_BOTTOM <= fb_h) s++;
+
+    /* Ordinary resizes must not move the panels — a window drag would
+       otherwise throw away wherever the user put them. Only a change of
+       scale, which invalidates the positions anyway, relays them out. */
+    if (s == st->ui.scale && device_scale == st->ui.device_scale) return;
+
+    printf("display: backing scale %d, framebuffer %dpx tall -> ui scale %d\n",
+           device_scale, fb_h, s);
+
+    st->ui.scale        = s;
+    st->ui.device_scale = device_scale;
+
+    /* Stacked down the left edge with a gap between each, sized from the
+       content they hold — a panel's height is its widgets, so these have
+       to be spaced by hand rather than flowed. */
+    place_panel(&st->panel_tools,   "Tools",   12 * s,  20 * s);
+    place_panel(&st->panel_brush,   "Brush",   12 * s, 152 * s);
+    place_panel(&st->panel_colors,  "Colors",  12 * s, 244 * s);
+    place_panel(&st->panel_actions, "Actions", 12 * s, 387 * s);
+}
+
 /* ---- mode callbacks ---- */
 
 static void init(app_mode_t *m) {
@@ -625,20 +681,11 @@ static void init(app_mode_t *m) {
     canvas_clear(st);
     stroke_reset(st);                 /* seeds the empty dirty rect */
 
-    /* Panel coordinates are framebuffer pixels, so they scale with the
-       backing store or the whole UI would be half-size on a retina
-       display. Widths and metrics scale inside the ui layer. */
-    int s = (int)(platform_get_dpi_scale() + 0.5);
-    if (s < 1) s = 1;
-    st->ui.scale = s;
-
-    /* Stacked down the left edge with a gap between each, sized from the
-       content they hold — a panel's height is its widgets, so these have
-       to be spaced by hand rather than flowed. */
-    st->panel_tools   = (ui_panel_t){ .title = "Tools",   .pos = vec2(12 * s, 20 * s),  .w = 68, .open = true };
-    st->panel_brush   = (ui_panel_t){ .title = "Brush",   .pos = vec2(12 * s, 152 * s), .w = 68, .open = true };
-    st->panel_colors  = (ui_panel_t){ .title = "Colors",  .pos = vec2(12 * s, 244 * s), .w = 68, .open = true };
-    st->panel_actions = (ui_panel_t){ .title = "Actions", .pos = vec2(12 * s, 387 * s), .w = 68, .open = true };
+    st->panel_tools.open   = true;
+    st->panel_brush.open   = true;
+    st->panel_colors.open  = true;
+    st->panel_actions.open = true;
+    relayout_ui(st, fb0->height, (int)(platform_get_dpi_scale() + 0.5));
 
     m->state = st;
 }
@@ -749,6 +796,15 @@ static void event(app_mode_t *m, const platform_event_t *e) {
         else                apply_tool_stroke(st, line2d(st->last, p));
         st->last = p;
     } break;
+
+    /* Fires on a window resize AND on crossing to a display with a
+       different backing scale — the case that matters here, since both UI
+       scales are derived from it. The event carries both spaces, so the
+       backing scale is their ratio rather than a second platform query. */
+    case PLATFORM_EV_RESIZE:
+        if (e->resize.w > 0)
+            relayout_ui(st, e->resize.fb_h, e->resize.fb_w / e->resize.w);
+        break;
 
     default:
         break;
