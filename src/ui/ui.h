@@ -42,7 +42,16 @@ typedef struct {
 
 typedef struct {
     platform_framebuffer_t *fb;
-    int   scale;                     /* integer pixel multiplier (2 = retina) */
+
+    /* TWO scales, and conflating them is a bug that looks like broken hit
+       testing. `scale` is how large widgets are DRAWN — a free choice, the
+       bitmap grid multiplied up. `device_scale` is framebuffer pixels per
+       logical point, fixed by the display, and the only correct factor for
+       converting the mouse positions the platform delivers (which are in
+       points) into the framebuffer pixels every widget rect uses. They are
+       equal only by coincidence. */
+    int   scale;
+    int   device_scale;              /* 0 is read as 1 */
 
     /* Input, fed by ui_event() and consumed by the widget calls. */
     vec2_t mouse;

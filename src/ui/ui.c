@@ -70,12 +70,26 @@ static rect2d_t close_box(const ui_t *ui, const ui_panel_t *p) {
 
 /* ---- input ---- */
 
+/* Mouse events arrive in LOGICAL POINTS; every rect the UI lays out and
+   hit-tests is in FRAMEBUFFER PIXELS. They are the same numbers only at
+   scale 1, which is why hit testing appeared to work until the backing
+   scale started coming through correctly — then every widget sat twice as
+   far out as the cursor reported. Convert once, here, so no hit test
+   downstream has to know which space it is in.
+
+   device_scale, NOT scale: the widget size is a look, the device scale is
+   the coordinate spaces' actual ratio. */
+static vec2_t to_framebuffer(const ui_t *ui, int x, int y) {
+    int s = ui->device_scale ? ui->device_scale : 1;
+    return vec2(x * s, y * s);
+}
+
 bool ui_event(ui_t *ui, const platform_event_t *e) {
     int s = ui->scale ? ui->scale : 1;
 
     switch (e->kind) {
     case PLATFORM_EV_MOUSE_MOVE:
-        ui->mouse = vec2(e->move.x, e->move.y);
+        ui->mouse = to_framebuffer(ui, e->move.x, e->move.y);
         if (ui->drag) {
             ui->drag->pos = vec2_sub(ui->mouse, ui->drag_grab);
             return true;
@@ -86,7 +100,7 @@ bool ui_event(ui_t *ui, const platform_event_t *e) {
 
     case PLATFORM_EV_MOUSE_DOWN: {
         if (e->mouse.btn != PLATFORM_MOUSE_LEFT) return false;
-        ui->mouse = vec2(e->mouse.x, e->mouse.y);
+        ui->mouse = to_framebuffer(ui, e->mouse.x, e->mouse.y);
 
         /* Hit-tested against last frame's rects: the panel is drawn during
            frame(), which has not run yet for this event. A panel moved on
@@ -132,7 +146,7 @@ bool ui_event(ui_t *ui, const platform_event_t *e) {
 
     case PLATFORM_EV_MOUSE_UP: {
         if (e->mouse.btn != PLATFORM_MOUSE_LEFT) return false;
-        ui->mouse = vec2(e->mouse.x, e->mouse.y);
+        ui->mouse = to_framebuffer(ui, e->mouse.x, e->mouse.y);
         bool owned = ui->drag != NULL || ui->active != 0;
         ui->drag           = NULL;
         ui->mouse_down     = false;
