@@ -1003,9 +1003,18 @@ int platform_run(const platform_app_desc_t *desc) {
         return -1;
     }
 
+    /* Published before init_cb, not after: an init callback legitimately
+       queries the platform it is initialising against, and every getter
+       gated on active_desc — platform_get_dpi_scale above all — otherwise
+       hands back its not-ready default. That silently gave the UI layer
+       scale 1 on a retina display, so every panel drew half size while
+       the canvas, which reads state.fb directly, was correct.
+       Safe this early: active_desc only feeds getters and
+       drain_event_queue, and nothing drains until the run loop below. */
+    state.active_desc = desc;
+
     if (desc->init_cb) desc->init_cb(desc->user_data);
 
-    state.active_desc = desc;
     state.t0          = CFAbsoluteTimeGetCurrent();
     state.t_prev      = state.t0;
     state.t_now       = state.t0;
