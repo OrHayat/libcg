@@ -2,5 +2,16 @@
     "editor.formatOnSave": true,
     "[c]": { "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd" },
     "[cpp]": { "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd" },
-    "[objective-c]": { "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd" }
+    "[objective-c]": { "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd" },
+
+    // Used only when compile_commands.json is missing (never generated, killed by
+    // `make clean`) or does not yet list a file (a .c added since the last
+    // `make compdb`). Includes are root-relative -- "debug/display_info.h" -- so
+    // without this clangd reports every one as file-not-found.
+    //
+    // The path must be absolute. clangd runs fallback commands with the cwd set to
+    // the *source file's* directory, not the project root, so a bare -Isrc would
+    // resolve against e.g. src/app/ and silently miss. ${workspaceFolder} is
+    // expanded by the extension, keeping this portable across machines.
+    "clangd.fallbackFlags": ["-I${workspaceFolder}/src", "-std=c11"]
 }
