@@ -4,6 +4,7 @@
 #include "render/framebuffer.h"
 #include "render/geom.h"
 #include "util/image.h"
+#include "ui/ui.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +58,11 @@ typedef struct {
        full-canvas sweep. Empty is dirty_x1 < dirty_x0. */
     u8  *stroke;
     int  dirty_x0, dirty_y0, dirty_x1, dirty_y1;
+
+    /* Panels are retained so closing one and reopening it restores its
+       place; the ui_t itself only carries a frame's worth of input. */
+    ui_t       ui;
+    ui_panel_t panel_tools, panel_brush, panel_colors, panel_actions;
 } paint_state_t;
 
 #define CANVAS_BG PCOLOR_RGB(0xFF, 0xFF, 0xFF)
@@ -378,15 +384,20 @@ static int clamp_size(int size) {
    doing nothing, and stepping the brush down to 1 lands back on the pencil.
    Eraser and the shape tools keep their own plain size adjustment.
    Always echoes — a silent [ / ] reads as a dead key. */
-static void adjust_size(paint_state_t *st, int delta) {
+static int current_size(const paint_state_t *st) {
+    return st->tool == TOOL_PENCIL ? 1 : st->brush_size;
+}
+
+/* The ramp lives here alone, so the [ / ] keys and the brush slider cannot
+   disagree about what width 1 means. */
+static void set_size(paint_state_t *st, int size) {
     if (st->tool != TOOL_PENCIL && st->tool != TOOL_BRUSH) {
-        st->brush_size = clamp_size(st->brush_size + delta);
+        st->brush_size = clamp_size(size);
         printf("size: %d\n", st->brush_size);
         return;
     }
 
-    int current = (st->tool == TOOL_PENCIL) ? 1 : st->brush_size;
-    int next    = clamp_size(current + delta);
+    int next = clamp_size(size);
     if (next <= 1) {
         st->tool = TOOL_PENCIL;        /* brush_size left alone, so the
                                           eraser keeps the width it had */
@@ -395,6 +406,12 @@ static void adjust_size(paint_state_t *st, int delta) {
         st->brush_size = next;
     }
     print_tool(st);
+}
+
+static void adjust_size(paint_state_t *st, int delta) {
+    set_size(st, (st->tool != TOOL_PENCIL && st->tool != TOOL_BRUSH)
+                     ? st->brush_size + delta
+                     : current_size(st) + delta);
 }
 
 /* ---- file I/O ---- */
@@ -505,28 +522,68 @@ typedef enum {
     CMD_OPEN,
 } paint_cmd_t;
 
+/* Which panel a command's button belongs to. */
+typedef enum { GROUP_TOOL, GROUP_SIZE, GROUP_ACTION } paint_group_t;
+
 typedef struct {
     paint_cmd_t    cmd;
-    const char    *label;      /* button text once there is a toolbar */
+    const char    *label;      /* button text */
+    paint_group_t  group;      /* panel the button lands in */
     platform_key_t key;
     u32            mods;       /* OR of platform_mod_t; 0 = unmodified key */
 } paint_binding_t;
 
-/* Bindings as data, in the order a toolbar would lay them out. */
+/* Bindings as data, in the order the toolbar lays them out. Every command
+   has a row, so nothing can end up keyboard-only. */
 static const paint_binding_t PAINT_COMMANDS[] = {
-    { CMD_TOOL_PENCIL,        "Pencil",   PLATFORM_KEY_1,             0 },
-    { CMD_TOOL_BRUSH,         "Brush",    PLATFORM_KEY_2,             0 },
-    { CMD_TOOL_ERASER,        "Eraser",   PLATFORM_KEY_3,             0 },
-    { CMD_TOOL_LINE,          "Line",     PLATFORM_KEY_4,             0 },
-    { CMD_TOOL_TRIANGLE,      "Triangle", PLATFORM_KEY_5,             0 },
-    { CMD_TOOL_TRIANGLE_WIRE, "Tri Wire", PLATFORM_KEY_6,             0 },
-    { CMD_SIZE_DEC,           "Smaller",  PLATFORM_KEY_LEFT_BRACKET,  0 },
-    { CMD_SIZE_INC,           "Bigger",   PLATFORM_KEY_RIGHT_BRACKET, 0 },
-    { CMD_CANCEL,             "Cancel",   PLATFORM_KEY_ESCAPE,        0 },
-    { CMD_CLEAR,              "Clear",    PLATFORM_KEY_C,             0 },
-    { CMD_SAVE,               "Save",     PLATFORM_KEY_S,             0 },
-    { CMD_OPEN,               "Open",     PLATFORM_KEY_O,             0 },
+    { CMD_TOOL_PENCIL,        "Pencil",   GROUP_TOOL,   PLATFORM_KEY_1,             0 },
+    { CMD_TOOL_BRUSH,         "Brush",    GROUP_TOOL,   PLATFORM_KEY_2,             0 },
+    { CMD_TOOL_ERASER,        "Eraser",   GROUP_TOOL,   PLATFORM_KEY_3,             0 },
+    { CMD_TOOL_LINE,          "Line",     GROUP_TOOL,   PLATFORM_KEY_4,             0 },
+    { CMD_TOOL_TRIANGLE,      "Triangle", GROUP_TOOL,   PLATFORM_KEY_5,             0 },
+    { CMD_TOOL_TRIANGLE_WIRE, "Tri Wire", GROUP_TOOL,   PLATFORM_KEY_6,             0 },
+    { CMD_SIZE_DEC,           "Smaller",  GROUP_SIZE,   PLATFORM_KEY_LEFT_BRACKET,  0 },
+    { CMD_SIZE_INC,           "Bigger",   GROUP_SIZE,   PLATFORM_KEY_RIGHT_BRACKET, 0 },
+    { CMD_CANCEL,             "Cancel",   GROUP_ACTION, PLATFORM_KEY_ESCAPE,        0 },
+    { CMD_CLEAR,              "Clear",    GROUP_ACTION, PLATFORM_KEY_C,             0 },
+    { CMD_SAVE,               "Save",     GROUP_ACTION, PLATFORM_KEY_S,             0 },
+    { CMD_OPEN,               "Open",     GROUP_ACTION, PLATFORM_KEY_O,             0 },
 };
+
+/* Palette offered by the Colors panel. The last entry is deliberately
+   translucent: paint opacity is the colour's alpha, so the panel should
+   make that reachable without typing hex at the '#' prompt. */
+static const color_t PALETTE[] = {
+    COLOR_RGB(0x00, 0x00, 0x00), COLOR_RGB(0x7F, 0x7F, 0x7F),
+    COLOR_RGB(0xFF, 0xFF, 0xFF), COLOR_RGB(0xC0, 0x00, 0x00),
+    COLOR_RGB(0xFF, 0x00, 0x00), COLOR_RGB(0xFF, 0x88, 0x00),
+    COLOR_RGB(0xFF, 0xE0, 0x00), COLOR_RGB(0x00, 0xA0, 0x00),
+    COLOR_RGB(0x00, 0xE0, 0x40), COLOR_RGB(0x00, 0x60, 0xC0),
+    COLOR_RGB(0x00, 0xC0, 0xFF), COLOR_RGB(0x60, 0x00, 0xC0),
+    COLOR_RGB(0xC0, 0x00, 0xC0), COLOR_RGB(0x80, 0x40, 0x00),
+    COLOR_RGB(0xFF, 0xC0, 0xA0), COLOR_RGBA(0xFF, 0x00, 0x00, 0x60),
+};
+
+/* Shared by the shell's '#' overlay and the Colors panel, so both report
+   the change the same way. */
+static void apply_color(paint_state_t *st, color_t c) {
+    st->color = c;
+    printf("paint color: 0x%08X\n", c.rgba);
+}
+
+/* Buttons read state rather than remembering it, so a tool picked with the
+   keyboard lights its button up with no extra plumbing. */
+static bool cmd_is_selected(const paint_state_t *st, paint_cmd_t cmd) {
+    switch (cmd) {
+    case CMD_TOOL_PENCIL:        return st->tool == TOOL_PENCIL;
+    case CMD_TOOL_BRUSH:         return st->tool == TOOL_BRUSH;
+    case CMD_TOOL_ERASER:        return st->tool == TOOL_ERASER;
+    case CMD_TOOL_LINE:          return st->tool == TOOL_LINE;
+    case CMD_TOOL_TRIANGLE:      return st->tool == TOOL_TRIANGLE;
+    case CMD_TOOL_TRIANGLE_WIRE: return st->tool == TOOL_TRIANGLE_WIRE;
+    default:                     return false;
+    }
+}
 
 static void paint_exec(paint_state_t *st, paint_cmd_t cmd) {
     switch (cmd) {
@@ -568,6 +625,21 @@ static void init(app_mode_t *m) {
     canvas_clear(st);
     stroke_reset(st);                 /* seeds the empty dirty rect */
 
+    /* Panel coordinates are framebuffer pixels, so they scale with the
+       backing store or the whole UI would be half-size on a retina
+       display. Widths and metrics scale inside the ui layer. */
+    int s = (int)(platform_get_dpi_scale() + 0.5);
+    if (s < 1) s = 1;
+    st->ui.scale = s;
+
+    /* Stacked down the left edge with a gap between each, sized from the
+       content they hold — a panel's height is its widgets, so these have
+       to be spaced by hand rather than flowed. */
+    st->panel_tools   = (ui_panel_t){ .title = "Tools",   .x = 12 * s, .y = 12 * s,  .w = 68, .open = true };
+    st->panel_brush   = (ui_panel_t){ .title = "Brush",   .x = 12 * s, .y = 146 * s, .w = 68, .open = true };
+    st->panel_colors  = (ui_panel_t){ .title = "Colors",  .x = 12 * s, .y = 240 * s, .w = 68, .open = true };
+    st->panel_actions = (ui_panel_t){ .title = "Actions", .x = 12 * s, .y = 385 * s, .w = 68, .open = true };
+
     m->state = st;
 }
 
@@ -585,6 +657,13 @@ static void leave(app_mode_t *m) {
 
 static void event(app_mode_t *m, const platform_event_t *e) {
     paint_state_t *st = m->state;
+
+    /* The UI sees the mouse first and swallows what it uses, so a click on
+       a button never also lands on the canvas underneath it. A stroke
+       already in progress keeps its capture: ui_event only claims presses
+       that start on a panel. */
+    if (ui_event(&st->ui, e)) return;
+
     switch (e->kind) {
     case PLATFORM_EV_KEY_DOWN:
         if (e->key.repeat) break;
@@ -676,6 +755,55 @@ static void event(app_mode_t *m, const platform_event_t *e) {
     }
 }
 
+/* Buttons for one group, in table order. */
+static void group_buttons(paint_state_t *st, paint_group_t group) {
+    for (int i = 0; i < ARRAY_COUNT(PAINT_COMMANDS); i++) {
+        const paint_binding_t *b = &PAINT_COMMANDS[i];
+        if (b->group != group) continue;
+        if (ui_button(&st->ui, b->label, cmd_is_selected(st, b->cmd)))
+            paint_exec(st, b->cmd);
+    }
+}
+
+static void draw_ui(paint_state_t *st, platform_framebuffer_t *fb) {
+    ui_t *ui = &st->ui;
+    ui_begin_frame(ui, fb, ui->scale);
+
+    if (ui_panel_begin(ui, &st->panel_tools)) {
+        group_buttons(st, GROUP_TOOL);
+        ui_panel_end(ui);
+    }
+
+    if (ui_panel_begin(ui, &st->panel_brush)) {
+        /* The slider goes through set_size for the same reason the keys do
+           — the pencil/brush ramp has exactly one implementation. */
+        int size = current_size(st);
+        if (ui_slider(ui, "Size", &size, 1, 32)) set_size(st, size);
+        group_buttons(st, GROUP_SIZE);
+        ui_panel_end(ui);
+    }
+
+    if (ui_panel_begin(ui, &st->panel_colors)) {
+        char hex[16];
+        snprintf(hex, sizeof hex, "%08X", st->color.rgba);
+        ui_label(ui, hex);
+        int picked = -1;
+        int selected = -1;
+        for (int i = 0; i < ARRAY_COUNT(PALETTE); i++)
+            if (PALETTE[i].rgba == st->color.rgba) selected = i;
+        if (ui_swatches(ui, PALETTE, ARRAY_COUNT(PALETTE), selected, &picked))
+            apply_color(st, PALETTE[picked]);
+        ui_panel_end(ui);
+    }
+
+    if (ui_panel_begin(ui, &st->panel_actions)) {
+        group_buttons(st, GROUP_ACTION);
+        ui_panel_end(ui);
+    }
+
+    ui_end_frame(ui);
+}
+
 static void frame(app_mode_t *m, platform_framebuffer_t *fb) {
     paint_state_t *st = m->state;
     render_canvas(fb, st);
@@ -690,12 +818,12 @@ static void frame(app_mode_t *m, platform_framebuffer_t *fb) {
         stroke_blit(st, pcolor_pixels(fb->pixels), fb->width, fb->height,
                     off.x, off.y, color);
     }
+
+    draw_ui(st, fb);                  /* panels sit above the canvas */
 }
 
 static void set_color(app_mode_t *m, color_t c) {
-    paint_state_t *st = m->state;
-    st->color = c;
-    printf("paint color: 0x%08X\n", c.rgba);
+    apply_color(m->state, c);
 }
 
 app_mode_t paint_mode(void) {
