@@ -2,6 +2,7 @@
 #include "render/color.h"
 #include "render/draw2d.h"
 #include "render/framebuffer.h"
+#include "ui/font.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +13,7 @@ typedef enum {
     PATTERN_CYCLE,
     PATTERN_NOISE,
     PATTERN_PRIMITIVES,
+    PATTERN_TEXT,
     PATTERN_CUSTOM_COLOR,
 } pattern_t;
 
@@ -144,6 +146,37 @@ static const char *mouse_button_name(platform_mouse_button_t b) {
     }
 }
 
+/* Font sample sheet. Every printable glyph at two scales, then a pangram
+   at 1x/2x/3x so word shapes can be judged and not just single letters.
+   Descenders (g j p q y) use the cell's last row, so the pangram lines are
+   where clipping would show first. */
+static void render_text_sheet(platform_framebuffer_t *fb) {
+    framebuffer_clear(fb, PCOLOR_RGB(0x18, 0x18, 0x20));
+    const pcolor_t ink   = PCOLOR_RGB(0xF0, 0xF0, 0xF0);
+    const pcolor_t faint = (pcolor_t){ .rgba = 0x80FF8800 };  /* 50%, premultiplied */
+
+    int y = 16;
+    for (int base = 32; base < 127; base += 24) {
+        char row[25];
+        int n = 0;
+        for (int c = base; c < base + 24 && c < 127; c++) row[n++] = (char)c;
+        row[n] = '\0';
+        ui_font_draw(fb, 16, y, row, 2, ink);
+        y += UI_FONT_CELL_H * 2 + 6;
+    }
+
+    y += 10;
+    const char *pangram = "Quick jump: 0123 #ff8800 [size] {x,y}";
+    for (int scale = 1; scale <= 3; scale++) {
+        ui_font_draw(fb, 16, y, pangram, scale, ink);
+        y += UI_FONT_CELL_H * scale + 8;
+    }
+
+    /* Translucent ink over the sheet: text blends rather than overwrites,
+       so this must tint what is under it instead of punching a hole. */
+    ui_font_draw(fb, 16, y + 8, "50% alpha text blends over the background", 2, faint);
+}
+
 /* ---- mode callbacks ---- */
 
 static void init(app_mode_t *m) {
@@ -170,6 +203,7 @@ static void event(app_mode_t *m, const platform_event_t *e) {
         case PLATFORM_KEY_3: st->pattern = PATTERN_CYCLE;    break;
         case PLATFORM_KEY_4: st->pattern = PATTERN_NOISE;      break;
         case PLATFORM_KEY_5: st->pattern = PATTERN_PRIMITIVES; break;
+        case PLATFORM_KEY_6: st->pattern = PATTERN_TEXT;       break;
         case PLATFORM_KEY_B:
             st->bg_checkerboard = !st->bg_checkerboard;
             printf("background: %s\n", st->bg_checkerboard ? "checkerboard" : "transparent");
@@ -209,6 +243,7 @@ static void frame(app_mode_t *m, platform_framebuffer_t *fb) {
     case PATTERN_CYCLE:        render_cycle(fb, platform_now() * 3.0);    break;
     case PATTERN_NOISE:        render_noise(fb);                          break;
     case PATTERN_PRIMITIVES:   render_primitives(fb);                     break;
+    case PATTERN_TEXT:         render_text_sheet(fb);                     break;
     case PATTERN_CUSTOM_COLOR: render_custom_color(fb, st->custom_color); break;
     }
 }

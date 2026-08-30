@@ -5,6 +5,7 @@
 
 /* Debug fill patterns for the whole framebuffer.
      1 solid   2 gradient   3 color cycle   4 noise   5 draw2d primitives
+     6 font sample sheet
      B toggle checkerboard background (vs. transparent window)
      # (shell) custom color, alpha-blended over the background
    Mouse buttons / scroll are echoed to stdout. */
