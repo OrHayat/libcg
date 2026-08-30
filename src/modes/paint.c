@@ -275,6 +275,13 @@ static void apply_tool_stroke(paint_state_t *st, int x0, int y0, int x1, int y1)
     draw2d_walk_line(x0, y0, x1, y1, stamp_cb, st);
 }
 
+/* Mark a single covered pixel. The shape rasterizers report interior
+   coverage one pixel at a time; the brush footprint applies to the outline
+   tools only, so this stamps width 1. */
+static void mark_px_cb(int x, int y, void *ud) {
+    stamp_square(ud, x, y, 1);
+}
+
 /* Shapes are re-marked from scratch whenever their geometry changes, so the
    mask always holds the current rubber-band. Because the preview draws from
    the same mask that will be composited, what you see while dragging is
@@ -284,16 +291,37 @@ static void line_remark(paint_state_t *st) {
     draw2d_walk_line(st->line_x0, st->line_y0, st->line_x1, st->line_y1, stamp_cb, st);
 }
 
+/* The complete three-corner shape: interior for TOOL_TRIANGLE, outline for
+   TOOL_TRIANGLE_WIRE. Preview and commit both mark through here, so a
+   filled triangle no longer previews as an outline and then commits as a
+   fill. Marking coverage rather than blending keeps the fill single-blended
+   exactly as the direct rasterizer call did. */
+static void triangle_mark_full(paint_state_t *st) {
+    const int *x = st->tri_x, *y = st->tri_y;
+    /* Clipped to the canvas, so corners dragged into the letterbox are cut. */
+    if (st->tool == TOOL_TRIANGLE
+        && draw2d_walk_triangle(x[0], y[0], x[1], y[1], x[2], y[2],
+                                st->canvas_w, st->canvas_h, mark_px_cb, st))
+        return;
+
+    /* Outline, for the wire tool and for a filled triangle with no interior.
+       Collinear corners have zero area, and the live corner is seeded on top
+       of the one just placed, so a filled triangle is degenerate every time a
+       corner lands and whenever the cursor crosses the line through the other
+       two. Marking nothing there would blink the rubber-band out instead of
+       degenerating to the line the shape actually is. */
+    apply_tool_stroke(st, x[0], y[0], x[1], y[1]);
+    apply_tool_stroke(st, x[1], y[1], x[2], y[2]);
+    apply_tool_stroke(st, x[2], y[2], x[0], y[0]);
+}
+
 static void triangle_remark(paint_state_t *st) {
     stroke_reset(st);
     const int *x = st->tri_x, *y = st->tri_y;
-    if (st->tri_n == 1) {
-        apply_tool_stroke(st, x[0], y[0], x[1], y[1]);
-    } else if (st->tri_n == 2) {
-        apply_tool_stroke(st, x[0], y[0], x[1], y[1]);
-        apply_tool_stroke(st, x[1], y[1], x[2], y[2]);
-        apply_tool_stroke(st, x[2], y[2], x[0], y[0]);
-    }
+    /* One corner placed: no interior exists yet, so track the cursor with a
+       plain edge whichever triangle tool is selected. */
+    if (st->tri_n == 1)      apply_tool_stroke(st, x[0], y[0], x[1], y[1]);
+    else if (st->tri_n == 2) triangle_mark_full(st);
 }
 
 static void line_commit(paint_state_t *st) {
@@ -303,29 +331,9 @@ static void line_commit(paint_state_t *st) {
 }
 
 static void triangle_commit(paint_state_t *st) {
-    const int *x = st->tri_x, *y = st->tri_y;
-    if (st->tool == TOOL_TRIANGLE_WIRE) {
-        stroke_reset(st);
-        apply_tool_stroke(st, x[0], y[0], x[1], y[1]);
-        apply_tool_stroke(st, x[1], y[1], x[2], y[2]);
-        apply_tool_stroke(st, x[2], y[2], x[0], y[0]);
-        stroke_composite(st);
-    } else {
-        /* A filled triangle covers each pixel once already, so it can go
-           straight onto the canvas without the mask. */
-        stroke_reset(st);
-        /* The canvas is a bare pixel grid; wrap it so the shared
-           rasterizer can write into it. Clipping is per the canvas
-           dimensions, so corners dragged into the letterbox are cut. */
-        platform_framebuffer_t canvas_fb = {
-            /* platform.h knows nothing of pcolor_t, so hand it the raw
-               buffer; the rasterizer views it back as pcolor_t. */
-            .pixels = (u32 *)st->canvas,
-            .width = st->canvas_w, .height = st->canvas_h,
-        };
-        draw2d_triangle_fill_blend(&canvas_fb, x[0], y[0], x[1], y[1], x[2], y[2],
-                                   color_premultiply(st->color));
-    }
+    stroke_reset(st);
+    triangle_mark_full(st);
+    stroke_composite(st);
     st->tri_n = 0;
 }
 
