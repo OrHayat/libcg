@@ -3,6 +3,7 @@
 
 #include "platform/platform.h"
 #include "render/color.h"
+#include "render/geom.h"
 #include "ui/font.h"
 
 /* ============================================================
@@ -32,8 +33,8 @@ typedef u32 ui_id;                   /* 0 = nothing */
 
 typedef struct {
     const char *title;
-    int         x, y;                /* top-left; the layer moves these on drag */
-    int         w;                   /* fixed width; height follows the content */
+    vec2_t      pos;                 /* top-left; the layer moves this on drag */
+    int         w;                   /* fixed width, UNSCALED; height follows content */
     bool        open;
 
     int         last_h;              /* previous frame's height — see ui.c */
@@ -44,7 +45,7 @@ typedef struct {
     int   scale;                     /* integer pixel multiplier (2 = retina) */
 
     /* Input, fed by ui_event() and consumed by the widget calls. */
-    int   mouse_x, mouse_y;
+    vec2_t mouse;
     bool  mouse_down;                /* left button held */
     bool  mouse_pressed;             /* went down since the last frame */
     bool  mouse_released;            /* went up since the last frame */
@@ -53,7 +54,7 @@ typedef struct {
     ui_id active;                    /* pressed on — holds capture until release */
 
     ui_panel_t *drag;                /* panel being dragged by its title bar */
-    int   drag_dx, drag_dy;
+    vec2_t drag_grab;                /* cursor offset within the panel at grab */
 
     /* Current panel's layout cursor. */
     ui_panel_t *panel;
@@ -71,7 +72,7 @@ typedef struct {
     int   menubar_h;                 /* 0 when the frame drew no menu bar */
     int   menubar_x;                 /* layout cursor along the strip */
     ui_id menu_open;
-    int   menu_x, menu_y, menu_w, menu_h;   /* open dropdown, for hit testing */
+    rect2d_t menu;                   /* open dropdown, for hit testing */
     int   menu_item;
 } ui_t;
 

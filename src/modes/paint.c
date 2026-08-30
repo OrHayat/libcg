@@ -635,10 +635,10 @@ static void init(app_mode_t *m) {
     /* Stacked down the left edge with a gap between each, sized from the
        content they hold — a panel's height is its widgets, so these have
        to be spaced by hand rather than flowed. */
-    st->panel_tools   = (ui_panel_t){ .title = "Tools",   .x = 12 * s, .y = 20 * s,  .w = 68, .open = true };
-    st->panel_brush   = (ui_panel_t){ .title = "Brush",   .x = 12 * s, .y = 152 * s, .w = 68, .open = true };
-    st->panel_colors  = (ui_panel_t){ .title = "Colors",  .x = 12 * s, .y = 244 * s, .w = 68, .open = true };
-    st->panel_actions = (ui_panel_t){ .title = "Actions", .x = 12 * s, .y = 387 * s, .w = 68, .open = true };
+    st->panel_tools   = (ui_panel_t){ .title = "Tools",   .pos = vec2(12 * s, 20 * s),  .w = 68, .open = true };
+    st->panel_brush   = (ui_panel_t){ .title = "Brush",   .pos = vec2(12 * s, 152 * s), .w = 68, .open = true };
+    st->panel_colors  = (ui_panel_t){ .title = "Colors",  .pos = vec2(12 * s, 244 * s), .w = 68, .open = true };
+    st->panel_actions = (ui_panel_t){ .title = "Actions", .pos = vec2(12 * s, 387 * s), .w = 68, .open = true };
 
     m->state = st;
 }

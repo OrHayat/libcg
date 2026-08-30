@@ -20,53 +20,52 @@ static const pcolor_t COL_ON     = { .rgba = RGB(0x2E, 0x7D, 0xD1) };
 static const pcolor_t COL_TEXT   = { .rgba = RGB(0xEC, 0xEF, 0xF4) };
 static const pcolor_t COL_TRACK  = { .rgba = RGB(0x1E, 0x22, 0x2A) };
 
-static bool in_rect(int px, int py, int x, int y, int w, int h) {
-    return px >= x && px < x + w && py >= y && py < y + h;
+/* 1px border drawn just inside r. */
+static void rect_outline(platform_framebuffer_t *fb, rect2d_t r, pcolor_t c) {
+    framebuffer_fill_rect(fb, rect2d(r.x,             r.y,             r.w, 1  ), c);
+    framebuffer_fill_rect(fb, rect2d(r.x,             r.y + r.h - 1,   r.w, 1  ), c);
+    framebuffer_fill_rect(fb, rect2d(r.x,             r.y,             1,   r.h), c);
+    framebuffer_fill_rect(fb, rect2d(r.x + r.w - 1,   r.y,             1,   r.h), c);
 }
 
-static void rect_outline(platform_framebuffer_t *fb, int x, int y, int w, int h, pcolor_t c) {
-    framebuffer_fill_rect(fb, x,         y,         w, 1, c);
-    framebuffer_fill_rect(fb, x,         y + h - 1, w, 1, c);
-    framebuffer_fill_rect(fb, x,         y,         1, h, c);
-    framebuffer_fill_rect(fb, x + w - 1, y,         1, h, c);
-}
-
-static void blend_rect(platform_framebuffer_t *fb, int x, int y, int w, int h, pcolor_t src) {
-    int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
-    int x1 = x + w > fb->width  ? fb->width  : x + w;
-    int y1 = y + h > fb->height ? fb->height : y + h;
+static void blend_rect(platform_framebuffer_t *fb, rect2d_t r, pcolor_t src) {
+    r = rect2d_intersect(r, rect2d(0, 0, fb->width, fb->height));
     pcolor_t *px = pcolor_pixels(fb->pixels);
-    for (int yy = y0; yy < y1; yy++)
-        for (int xx = x0; xx < x1; xx++) {
-            pcolor_t *dst = &px[yy * fb->width + xx];
+    for (int y = r.y; y < r.y + r.h; y++)
+        for (int x = r.x; x < r.x + r.w; x++) {
+            pcolor_t *dst = &px[y * fb->width + x];
             *dst = color_blend(*dst, src);
         }
 }
 
 /* Alpha backdrop, so a translucent swatch reads as translucent. */
-static void checker_rect(platform_framebuffer_t *fb, int x, int y, int w, int h, int cell) {
+static void checker_rect(platform_framebuffer_t *fb, rect2d_t r, int cell) {
     const pcolor_t a = { .rgba = RGB(0x90, 0x90, 0x90) };
     const pcolor_t b = { .rgba = RGB(0x60, 0x60, 0x60) };
     if (cell < 1) cell = 1;
-    for (int yy = 0; yy < h; yy += cell)
-        for (int xx = 0; xx < w; xx += cell) {
-            int cw = xx + cell > w ? w - xx : cell;
-            int chh = yy + cell > h ? h - yy : cell;
-            framebuffer_fill_rect(fb, x + xx, y + yy, cw, chh,
-                                  ((xx / cell + yy / cell) & 1) ? b : a);
+    for (int y = 0; y < r.h; y += cell)
+        for (int x = 0; x < r.w; x += cell) {
+            /* The last cell in each direction is clipped to the rect
+               rather than allowed to overhang it. */
+            int cw = x + cell > r.w ? r.w - x : cell;
+            int ch = y + cell > r.h ? r.h - y : cell;
+            framebuffer_fill_rect(fb, rect2d(r.x + x, r.y + y, cw, ch),
+                                  ((x / cell + y / cell) & 1) ? b : a);
         }
 }
 
 /* Panel geometry. The title bar sits above the content box, and the close
    box is inset in its right end. */
-static int panel_h(const ui_panel_t *p) { return p->last_h; }
+static rect2d_t panel_rect(const ui_t *ui, const ui_panel_t *p) {
+    return rect2d(p->pos.x, p->pos.y, p->w * ui->scale, p->last_h);
+}
 
-static void close_box(const ui_t *ui, const ui_panel_t *p, int *x, int *y, int *w, int *h) {
+static rect2d_t close_box(const ui_t *ui, const ui_panel_t *p) {
     int s = ui->scale;
-    *w = CLOSE_W * s;
-    *h = CLOSE_W * s;
-    *x = p->x + p->w * s - *w - PAD * s / 2;
-    *y = p->y + (TITLE_H * s - *h) / 2;
+    int side = CLOSE_W * s;
+    return rect2d(p->pos.x + p->w * s - side - PAD * s / 2,
+                  p->pos.y + (TITLE_H * s - side) / 2,
+                  side, side);
 }
 
 /* ---- input ---- */
@@ -76,11 +75,9 @@ bool ui_event(ui_t *ui, const platform_event_t *e) {
 
     switch (e->kind) {
     case PLATFORM_EV_MOUSE_MOVE:
-        ui->mouse_x = e->move.x;
-        ui->mouse_y = e->move.y;
+        ui->mouse = vec2(e->move.x, e->move.y);
         if (ui->drag) {
-            ui->drag->x = e->move.x - ui->drag_dx;
-            ui->drag->y = e->move.y - ui->drag_dy;
+            ui->drag->pos = vec2_sub(ui->mouse, ui->drag_grab);
             return true;
         }
         /* A widget holding capture (a slider) still owns the cursor even
@@ -89,8 +86,7 @@ bool ui_event(ui_t *ui, const platform_event_t *e) {
 
     case PLATFORM_EV_MOUSE_DOWN: {
         if (e->mouse.btn != PLATFORM_MOUSE_LEFT) return false;
-        ui->mouse_x = e->mouse.x;
-        ui->mouse_y = e->mouse.y;
+        ui->mouse = vec2(e->mouse.x, e->mouse.y);
 
         /* Hit-tested against last frame's rects: the panel is drawn during
            frame(), which has not run yet for this event. A panel moved on
@@ -98,13 +94,12 @@ bool ui_event(ui_t *ui, const platform_event_t *e) {
            practice, and the same trade every immediate-mode UI makes. */
 
         /* An open dropdown is above everything, so it is tested first. */
-        if (ui->menu_open &&
-            in_rect(ui->mouse_x, ui->mouse_y, ui->menu_x, ui->menu_y, ui->menu_w, ui->menu_h)) {
+        if (ui->menu_open && rect2d_contains(ui->menu, ui->mouse)) {
             ui->mouse_down    = true;
             ui->mouse_pressed = true;
             return true;
         }
-        if (ui->menubar_h && ui->mouse_y < ui->menubar_h) {
+        if (ui->menubar_h && ui->mouse.y < ui->menubar_h) {
             ui->mouse_down    = true;
             ui->mouse_pressed = true;
             return true;
@@ -119,16 +114,12 @@ bool ui_event(ui_t *ui, const platform_event_t *e) {
         for (int i = ui->seen_count - 1; i >= 0; i--) {
             ui_panel_t *p = ui->seen[i];
             if (!p->open) continue;
-            int w = p->w * s, h = panel_h(p);
-            if (!in_rect(ui->mouse_x, ui->mouse_y, p->x, p->y, w, h)) continue;
+            if (!rect2d_contains(panel_rect(ui, p), ui->mouse)) continue;
 
-            int cx, cy, cw, ch;
-            close_box(ui, p, &cx, &cy, &cw, &ch);
-            bool on_close = in_rect(ui->mouse_x, ui->mouse_y, cx, cy, cw, ch);
-            if (!on_close && ui->mouse_y < p->y + TITLE_H * s) {
-                ui->drag    = p;
-                ui->drag_dx = ui->mouse_x - p->x;
-                ui->drag_dy = ui->mouse_y - p->y;
+            bool on_close = rect2d_contains(close_box(ui, p), ui->mouse);
+            if (!on_close && ui->mouse.y < p->pos.y + TITLE_H * s) {
+                ui->drag      = p;
+                ui->drag_grab = vec2_sub(ui->mouse, p->pos);
             }
             ui->mouse_down    = true;
             ui->mouse_pressed = true;
@@ -141,8 +132,7 @@ bool ui_event(ui_t *ui, const platform_event_t *e) {
 
     case PLATFORM_EV_MOUSE_UP: {
         if (e->mouse.btn != PLATFORM_MOUSE_LEFT) return false;
-        ui->mouse_x = e->mouse.x;
-        ui->mouse_y = e->mouse.y;
+        ui->mouse = vec2(e->mouse.x, e->mouse.y);
         bool owned = ui->drag != NULL || ui->active != 0;
         ui->drag           = NULL;
         ui->mouse_down     = false;
@@ -157,11 +147,9 @@ bool ui_event(ui_t *ui, const platform_event_t *e) {
 
 bool ui_wants_mouse(const ui_t *ui) {
     if (ui->drag || ui->active) return true;
-    int s = ui->scale ? ui->scale : 1;
     for (int i = 0; i < ui->seen_count; i++) {
         const ui_panel_t *p = ui->seen[i];
-        if (p->open && in_rect(ui->mouse_x, ui->mouse_y, p->x, p->y, p->w * s, panel_h(p)))
-            return true;
+        if (p->open && rect2d_contains(panel_rect(ui, p), ui->mouse)) return true;
     }
     return false;
 }
@@ -191,8 +179,8 @@ static ui_id next_id(ui_t *ui) {
 }
 
 /* Shared hot/active bookkeeping. Returns true on a completed click. */
-static bool widget_input(ui_t *ui, ui_id id, int x, int y, int w, int h) {
-    bool over = in_rect(ui->mouse_x, ui->mouse_y, x, y, w, h);
+static bool widget_input(ui_t *ui, ui_id id, rect2d_t r) {
+    bool over = rect2d_contains(r, ui->mouse);
     if (over) ui->hot = id;
     if (over && ui->mouse_pressed) ui->active = id;
     return ui->mouse_released && ui->active == id && over;
@@ -211,13 +199,14 @@ bool ui_panel_begin(ui_t *ui, ui_panel_t *p) {
        determines this frame's height has not been issued yet. The lag
        shows only on the first frame a panel is opened, and only as a
        missing background. */
-    int h = panel_h(p);
-    if (h > 0) {
-        framebuffer_fill_rect(ui->fb, p->x, p->y, w, h, COL_PANEL);
-        rect_outline(ui->fb, p->x, p->y, w, h, COL_EDGE);
+    rect2d_t body = panel_rect(ui, p);
+    if (!rect2d_is_empty(body)) {
+        framebuffer_fill_rect(ui->fb, body, COL_PANEL);
+        rect_outline(ui->fb, body, COL_EDGE);
     }
-    framebuffer_fill_rect(ui->fb, p->x, p->y, w, TITLE_H * s, COL_TITLE);
-    ui_font_draw(ui->fb, p->x + PAD * s, p->y + (TITLE_H * s - UI_FONT_CELL_H * s) / 2,
+    framebuffer_fill_rect(ui->fb, rect2d(p->pos.x, p->pos.y, w, TITLE_H * s), COL_TITLE);
+    ui_font_draw(ui->fb, p->pos.x + PAD * s,
+                 p->pos.y + (TITLE_H * s - UI_FONT_CELL_H * s) / 2,
                  p->title, s, COL_TEXT);
 
     /* Close box — the only widget in the title bar, so it takes the
@@ -226,29 +215,35 @@ bool ui_panel_begin(ui_t *ui, ui_panel_t *p) {
     ui->seq         = 0;
     ui->panel_index = ui->seen_count - 1;
 
-    int cx, cy, cw, ch;
-    close_box(ui, p, &cx, &cy, &cw, &ch);
-    ui_id cid = next_id(ui);
-    bool clicked = widget_input(ui, cid, cx, cy, cw, ch);
-    framebuffer_fill_rect(ui->fb, cx, cy, cw, ch,
+    rect2d_t cb  = close_box(ui, p);
+    ui_id    cid = next_id(ui);
+    bool clicked = widget_input(ui, cid, cb);
+    framebuffer_fill_rect(ui->fb, cb,
                           ui->active == cid ? COL_DOWN : ui->hot == cid ? COL_HOT : COL_TITLE);
-    ui_font_draw(ui->fb, cx + (cw - UI_FONT_ADVANCE * s) / 2,
-                 cy + (ch - UI_FONT_CELL_H * s) / 2, "x", s, COL_TEXT);
+    ui_font_draw(ui->fb, cb.x + (cb.w - UI_FONT_ADVANCE * s) / 2,
+                 cb.y + (cb.h - UI_FONT_CELL_H * s) / 2, "x", s, COL_TEXT);
     if (clicked) p->open = false;
 
-    ui->content_x = p->x + PAD * s;
+    ui->content_x = p->pos.x + PAD * s;
     ui->content_w = w - 2 * PAD * s;
-    ui->cursor_y  = p->y + TITLE_H * s + PAD * s;
+    ui->cursor_y  = p->pos.y + TITLE_H * s + PAD * s;
     return true;
 }
 
 void ui_panel_end(ui_t *ui) {
     ui_panel_t *p = ui->panel;
-    p->last_h = ui->cursor_y + PAD * ui->scale - p->y;
+    p->last_h = ui->cursor_y + PAD * ui->scale - p->pos.y;
     ui->panel = NULL;
 }
 
 /* ---- widgets ---- */
+
+/* The next full-width row in the current panel, `h` tall. Advancing the
+   layout cursor is left to the caller: a widget that draws several rows
+   (swatches) advances once for all of them. */
+static rect2d_t next_row(const ui_t *ui, int h) {
+    return rect2d(ui->content_x, ui->cursor_y, ui->content_w, h);
+}
 
 void ui_label(ui_t *ui, const char *text) {
     int s = ui->scale;
@@ -258,19 +253,20 @@ void ui_label(ui_t *ui, const char *text) {
 
 bool ui_button(ui_t *ui, const char *label, bool selected) {
     int s = ui->scale;
-    int x = ui->content_x, y = ui->cursor_y, w = ui->content_w, h = ROW_H * s;
+    rect2d_t r = next_row(ui, ROW_H * s);
     ui_id id = next_id(ui);
-    bool clicked = widget_input(ui, id, x, y, w, h);
+    bool clicked = widget_input(ui, id, r);
 
     pcolor_t bg = selected ? COL_ON
                 : ui->active == id ? COL_DOWN
                 : ui->hot    == id ? COL_HOT
                 : COL_BTN;
-    framebuffer_fill_rect(ui->fb, x, y, w, h, bg);
-    rect_outline(ui->fb, x, y, w, h, COL_EDGE);
-    ui_font_draw(ui->fb, x + PAD * s, y + (h - UI_FONT_CELL_H * s) / 2, label, s, COL_TEXT);
+    framebuffer_fill_rect(ui->fb, r, bg);
+    rect_outline(ui->fb, r, COL_EDGE);
+    ui_font_draw(ui->fb, r.x + PAD * s, r.y + (r.h - UI_FONT_CELL_H * s) / 2,
+                 label, s, COL_TEXT);
 
-    ui->cursor_y += h + GAP * s;
+    ui->cursor_y += r.h + GAP * s;
     return clicked;
 }
 
@@ -283,20 +279,21 @@ bool ui_swatches(ui_t *ui, const color_t *colors, int count, int selected, int *
     bool hit = false;
     for (int i = 0; i < count; i++) {
         int col = i % per, row = i / per;
-        int x = ui->content_x + col * (sw + GAP * s);
-        int y = ui->cursor_y  + row * (sw + GAP * s);
+        rect2d_t r = rect2d(ui->content_x + col * (sw + GAP * s),
+                            ui->cursor_y  + row * (sw + GAP * s),
+                            sw, sw);
 
         ui_id id = next_id(ui);
-        if (widget_input(ui, id, x, y, sw, sw)) {
+        if (widget_input(ui, id, r)) {
             *picked = i;
             hit = true;
         }
         /* Checker first, colour blended over it: swatches carry real alpha,
            and the checker is what shows a translucent colour as translucent
            instead of quietly rendering it opaque. */
-        checker_rect(ui->fb, x, y, sw, sw, 4 * s);
-        blend_rect(ui->fb, x, y, sw, sw, color_premultiply(colors[i]));
-        rect_outline(ui->fb, x, y, sw, sw,
+        checker_rect(ui->fb, r, 4 * s);
+        blend_rect(ui->fb, r, color_premultiply(colors[i]));
+        rect_outline(ui->fb, r,
                      i == selected ? COL_ON : ui->hot == id ? COL_TEXT : COL_EDGE);
     }
 
@@ -311,9 +308,9 @@ bool ui_slider(ui_t *ui, const char *label, int *value, int min, int max) {
     snprintf(text, sizeof text, "%s %d", label, *value);
     ui_label(ui, text);
 
-    int x = ui->content_x, y = ui->cursor_y, w = ui->content_w, h = ROW_H * s;
+    rect2d_t r = next_row(ui, ROW_H * s);
     ui_id id = next_id(ui);
-    widget_input(ui, id, x, y, w, h);
+    widget_input(ui, id, r);
 
     /* Dragging keeps working past the track's ends: once this slider owns
        capture the cursor's x is clamped into range, so a fast drag doesn't
@@ -321,21 +318,21 @@ bool ui_slider(ui_t *ui, const char *label, int *value, int min, int max) {
     bool changed = false;
     if (ui->active == id) {
         int span = max - min;
-        int rel  = ui->mouse_x - x;
-        if (rel < 0) rel = 0;
-        if (rel > w) rel = w;
-        int v = min + (w ? (rel * span + w / 2) / w : 0);
+        int rel  = ui->mouse.x - r.x;
+        if (rel < 0)   rel = 0;
+        if (rel > r.w) rel = r.w;
+        int v = min + (r.w ? (rel * span + r.w / 2) / r.w : 0);
         if (v != *value) { *value = v; changed = true; }
     }
 
-    framebuffer_fill_rect(ui->fb, x, y, w, h, COL_TRACK);
+    framebuffer_fill_rect(ui->fb, r, COL_TRACK);
     int span = max - min;
-    int fill = span ? ((*value - min) * w) / span : 0;
-    framebuffer_fill_rect(ui->fb, x, y, fill, h,
+    int fill = span ? ((*value - min) * r.w) / span : 0;
+    framebuffer_fill_rect(ui->fb, rect2d(r.x, r.y, fill, r.h),
                           (ui->active == id || ui->hot == id) ? COL_ON : COL_BTN);
-    rect_outline(ui->fb, x, y, w, h, COL_EDGE);
+    rect_outline(ui->fb, r, COL_EDGE);
 
-    ui->cursor_y += h + GAP * s;
+    ui->cursor_y += r.h + GAP * s;
     return changed;
 }
 
@@ -350,37 +347,35 @@ void ui_menubar_begin(ui_t *ui) {
     ui->panel_index = UI_MAX_PANELS;
     ui->seq         = 0;
 
-    framebuffer_fill_rect(ui->fb, 0, 0, ui->fb->width, ui->menubar_h, COL_TITLE);
-    framebuffer_fill_rect(ui->fb, 0, ui->menubar_h - 1, ui->fb->width, 1, COL_EDGE);
+    framebuffer_fill_rect(ui->fb, rect2d(0, 0, ui->fb->width, ui->menubar_h), COL_TITLE);
+    framebuffer_fill_rect(ui->fb, rect2d(0, ui->menubar_h - 1, ui->fb->width, 1), COL_EDGE);
 }
 
 void ui_menubar_end(ui_t *ui) { (void)ui; }
 
 bool ui_menu_begin(ui_t *ui, const char *label, int items) {
     int s = ui->scale;
-    int w = ui_font_width(label, s) + 2 * PAD * s;
-    int x = ui->menubar_x, y = 0, h = ui->menubar_h;
+    rect2d_t tab = rect2d(ui->menubar_x, 0,
+                          ui_font_width(label, s) + 2 * PAD * s, ui->menubar_h);
 
     ui_id id = next_id(ui);
-    if (widget_input(ui, id, x, y, w, h)) ui->menu_open = (ui->menu_open == id) ? 0 : id;
+    if (widget_input(ui, id, tab)) ui->menu_open = (ui->menu_open == id) ? 0 : id;
 
     bool open = ui->menu_open == id;
-    framebuffer_fill_rect(ui->fb, x, y, w, h,
+    framebuffer_fill_rect(ui->fb, tab,
                           open ? COL_ON : ui->hot == id ? COL_HOT : COL_TITLE);
-    ui_font_draw(ui->fb, x + PAD * s, y + (h - UI_FONT_CELL_H * s) / 2, label, s, COL_TEXT);
-    ui->menubar_x += w;
+    ui_font_draw(ui->fb, tab.x + PAD * s, tab.y + (tab.h - UI_FONT_CELL_H * s) / 2,
+                 label, s, COL_TEXT);
+    ui->menubar_x += tab.w;
 
     if (!open) return false;
 
     /* Width is generous rather than measured: the rows have not been
        issued yet, so there is nothing to measure them from. */
-    ui->menu_x    = x;
-    ui->menu_y    = h;
-    ui->menu_w    = 96 * s;
-    ui->menu_h    = items * ROW_H * s + 2 * s;
+    ui->menu      = rect2d(tab.x, tab.h, 96 * s, items * ROW_H * s + 2 * s);
     ui->menu_item = 0;
-    framebuffer_fill_rect(ui->fb, ui->menu_x, ui->menu_y, ui->menu_w, ui->menu_h, COL_PANEL);
-    rect_outline(ui->fb, ui->menu_x, ui->menu_y, ui->menu_w, ui->menu_h, COL_EDGE);
+    framebuffer_fill_rect(ui->fb, ui->menu, COL_PANEL);
+    rect_outline(ui->fb, ui->menu, COL_EDGE);
     return true;
 }
 
@@ -388,18 +383,20 @@ void ui_menu_end(ui_t *ui) { (void)ui; }
 
 bool ui_menu_item(ui_t *ui, const char *label, bool checked) {
     int s = ui->scale;
-    int x = ui->menu_x + s, y = ui->menu_y + s + ui->menu_item * ROW_H * s;
-    int w = ui->menu_w - 2 * s, h = ROW_H * s;
+    /* Inset by the 1px (scaled) border so a row never paints over it. */
+    rect2d_t r = rect2d(ui->menu.x + s,
+                        ui->menu.y + s + ui->menu_item * ROW_H * s,
+                        ui->menu.w - 2 * s, ROW_H * s);
     ui->menu_item++;
 
     ui_id id = next_id(ui);
-    bool clicked = widget_input(ui, id, x, y, w, h);
+    bool clicked = widget_input(ui, id, r);
 
-    framebuffer_fill_rect(ui->fb, x, y, w, h, ui->hot == id ? COL_HOT : COL_PANEL);
-    ui_font_draw(ui->fb, x + PAD * s, y + (h - UI_FONT_CELL_H * s) / 2,
-                 checked ? "*" : " ", s, COL_ON);
-    ui_font_draw(ui->fb, x + PAD * s + UI_FONT_ADVANCE * 2 * s,
-                 y + (h - UI_FONT_CELL_H * s) / 2, label, s, COL_TEXT);
+    framebuffer_fill_rect(ui->fb, r, ui->hot == id ? COL_HOT : COL_PANEL);
+    int text_y = r.y + (r.h - UI_FONT_CELL_H * s) / 2;
+    ui_font_draw(ui->fb, r.x + PAD * s, text_y, checked ? "*" : " ", s, COL_ON);
+    ui_font_draw(ui->fb, r.x + PAD * s + UI_FONT_ADVANCE * 2 * s, text_y,
+                 label, s, COL_TEXT);
 
     if (clicked) ui->menu_open = 0;      /* picking an item closes the menu */
     return clicked;
