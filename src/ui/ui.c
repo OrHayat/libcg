@@ -96,6 +96,26 @@ bool ui_event(ui_t *ui, const platform_event_t *e) {
            frame(), which has not run yet for this event. A panel moved on
            the previous frame is therefore one frame stale — invisible in
            practice, and the same trade every immediate-mode UI makes. */
+
+        /* An open dropdown is above everything, so it is tested first. */
+        if (ui->menu_open &&
+            in_rect(ui->mouse_x, ui->mouse_y, ui->menu_x, ui->menu_y, ui->menu_w, ui->menu_h)) {
+            ui->mouse_down    = true;
+            ui->mouse_pressed = true;
+            return true;
+        }
+        if (ui->menubar_h && ui->mouse_y < ui->menubar_h) {
+            ui->mouse_down    = true;
+            ui->mouse_pressed = true;
+            return true;
+        }
+        /* Anywhere else dismisses an open menu, and eats the click that
+           did so — otherwise closing a menu would also paint a dot. */
+        if (ui->menu_open) {
+            ui->menu_open = 0;
+            return true;
+        }
+
         for (int i = ui->seen_count - 1; i >= 0; i--) {
             ui_panel_t *p = ui->seen[i];
             if (!p->open) continue;
@@ -154,6 +174,7 @@ void ui_begin_frame(ui_t *ui, platform_framebuffer_t *fb, int scale) {
     ui->hot         = 0;
     ui->seen_count  = 0;
     ui->panel_index = 0;
+    ui->menubar_h   = 0;
 }
 
 void ui_end_frame(ui_t *ui) {
@@ -316,4 +337,70 @@ bool ui_slider(ui_t *ui, const char *label, int *value, int min, int max) {
 
     ui->cursor_y += h + GAP * s;
     return changed;
+}
+
+/* ---- menu bar ---- */
+
+/* Ids for the strip must not collide with any panel's, so it takes the
+   slot one past the panel array. */
+void ui_menubar_begin(ui_t *ui) {
+    int s = ui->scale;
+    ui->menubar_h   = TITLE_H * s;
+    ui->menubar_x   = PAD * s;
+    ui->panel_index = UI_MAX_PANELS;
+    ui->seq         = 0;
+
+    framebuffer_fill_rect(ui->fb, 0, 0, ui->fb->width, ui->menubar_h, COL_TITLE);
+    framebuffer_fill_rect(ui->fb, 0, ui->menubar_h - 1, ui->fb->width, 1, COL_EDGE);
+}
+
+void ui_menubar_end(ui_t *ui) { (void)ui; }
+
+bool ui_menu_begin(ui_t *ui, const char *label, int items) {
+    int s = ui->scale;
+    int w = ui_font_width(label, s) + 2 * PAD * s;
+    int x = ui->menubar_x, y = 0, h = ui->menubar_h;
+
+    ui_id id = next_id(ui);
+    if (widget_input(ui, id, x, y, w, h)) ui->menu_open = (ui->menu_open == id) ? 0 : id;
+
+    bool open = ui->menu_open == id;
+    framebuffer_fill_rect(ui->fb, x, y, w, h,
+                          open ? COL_ON : ui->hot == id ? COL_HOT : COL_TITLE);
+    ui_font_draw(ui->fb, x + PAD * s, y + (h - UI_FONT_CELL_H * s) / 2, label, s, COL_TEXT);
+    ui->menubar_x += w;
+
+    if (!open) return false;
+
+    /* Width is generous rather than measured: the rows have not been
+       issued yet, so there is nothing to measure them from. */
+    ui->menu_x    = x;
+    ui->menu_y    = h;
+    ui->menu_w    = 96 * s;
+    ui->menu_h    = items * ROW_H * s + 2 * s;
+    ui->menu_item = 0;
+    framebuffer_fill_rect(ui->fb, ui->menu_x, ui->menu_y, ui->menu_w, ui->menu_h, COL_PANEL);
+    rect_outline(ui->fb, ui->menu_x, ui->menu_y, ui->menu_w, ui->menu_h, COL_EDGE);
+    return true;
+}
+
+void ui_menu_end(ui_t *ui) { (void)ui; }
+
+bool ui_menu_item(ui_t *ui, const char *label, bool checked) {
+    int s = ui->scale;
+    int x = ui->menu_x + s, y = ui->menu_y + s + ui->menu_item * ROW_H * s;
+    int w = ui->menu_w - 2 * s, h = ROW_H * s;
+    ui->menu_item++;
+
+    ui_id id = next_id(ui);
+    bool clicked = widget_input(ui, id, x, y, w, h);
+
+    framebuffer_fill_rect(ui->fb, x, y, w, h, ui->hot == id ? COL_HOT : COL_PANEL);
+    ui_font_draw(ui->fb, x + PAD * s, y + (h - UI_FONT_CELL_H * s) / 2,
+                 checked ? "*" : " ", s, COL_ON);
+    ui_font_draw(ui->fb, x + PAD * s + UI_FONT_ADVANCE * 2 * s,
+                 y + (h - UI_FONT_CELL_H * s) / 2, label, s, COL_TEXT);
+
+    if (clicked) ui->menu_open = 0;      /* picking an item closes the menu */
+    return clicked;
 }
