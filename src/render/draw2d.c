@@ -8,18 +8,19 @@
    axis; `err` accumulates the minor-axis error in units of 2*d so no
    division or float is needed. Symmetric across octants because sx/sy
    carry the direction and dx/dy the magnitudes. */
-void draw2d_walk_line(int x0, int y0, int x1, int y1, draw2d_pixel_fn fn, void *user_data) {
-    int dx =  abs(x1 - x0);
-    int dy = -abs(y1 - y0);
-    int sx = x0 < x1 ? 1 : -1;
-    int sy = y0 < y1 ? 1 : -1;
+void draw2d_walk_line(line2d_t l, draw2d_pixel_fn on_pixel, void *user_data) {
+    int x = l.a.x, y = l.a.y;
+    int dx =  abs(l.b.x - x);
+    int dy = -abs(l.b.y - y);
+    int sx = x < l.b.x ? 1 : -1;
+    int sy = y < l.b.y ? 1 : -1;
     int err = dx + dy;
     for (;;) {
-        fn(x0, y0, user_data);
-        if (x0 == x1 && y0 == y1) break;
+        on_pixel(x, y, user_data);
+        if (x == l.b.x && y == l.b.y) break;
         int e2 = 2 * err;
-        if (e2 >= dy) { err += dy; x0 += sx; }
-        if (e2 <= dx) { err += dx; y0 += sy; }
+        if (e2 >= dy) { err += dy; x += sx; }
+        if (e2 <= dx) { err += dx; y += sy; }
     }
 }
 
@@ -28,8 +29,8 @@ typedef struct {
     pcolor_t                color;
 } line_ctx_t;
 
-static void put_pixel(int x, int y, void *ud) {
-    line_ctx_t *c = ud;
+static void put_pixel(int x, int y, void *user_data) {
+    line_ctx_t *c = user_data;
     framebuffer_set_pixel(c->fb, x, y, c->color);
 }
 
@@ -38,103 +39,87 @@ static void put_pixel(int x, int y, void *ud) {
    projections), so mostly-offscreen lines are rare and the walk cost
    is bounded by max(|dx|,|dy|). Proper Cohen-Sutherland is a follow-up
    if that stops being true. */
-void draw2d_line(platform_framebuffer_t *fb, int x0, int y0, int x1, int y1, pcolor_t color) {
+void draw2d_line(platform_framebuffer_t *fb, line2d_t l, pcolor_t color) {
     line_ctx_t c = { .fb = fb, .color = color };
-    draw2d_walk_line(x0, y0, x1, y1, put_pixel, &c);
+    draw2d_walk_line(l, put_pixel, &c);
 }
 
-void draw2d_triangle_wire(platform_framebuffer_t *fb,
-                          int x0, int y0, int x1, int y1, int x2, int y2, pcolor_t color) {
-    draw2d_line(fb, x0, y0, x1, y1, color);
-    draw2d_line(fb, x1, y1, x2, y2, color);
-    draw2d_line(fb, x2, y2, x0, y0, color);
-}
-
-/* Twice the signed area of triangle (a, b, p). Positive when p is on the
-   left of a→b in screen space (y down). Inputs are pixel coordinates
-   bounded by the framebuffer, so the products stay well inside int32. */
-static int edge(int ax, int ay, int bx, int by, int px, int py) {
-    return (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+void draw2d_triangle_wire(platform_framebuffer_t *fb, tri2d_t t, pcolor_t color) {
+    draw2d_line(fb, line2d(t.a, t.b), color);
+    draw2d_line(fb, line2d(t.b, t.c), color);
+    draw2d_line(fb, line2d(t.c, t.a), color);
 }
 
 /* Top-left rule: with inside == (edge >= 0) and positive winding, an edge
    owns the pixels lying exactly on it when it is a "left" edge (points
    upward, dy < 0) or a "top" edge (horizontal, pointing right). Every
    other edge cedes them to the neighbouring triangle. */
-static bool edge_is_top_left(int ax, int ay, int bx, int by) {
-    int dx = bx - ax, dy = by - ay;
-    return dy < 0 || (dy == 0 && dx > 0);
+static bool edge_is_top_left(vec2_t a, vec2_t b) {
+    vec2_t d = vec2_sub(b, a);
+    return d.y < 0 || (d.y == 0 && d.x > 0);
 }
 
-static int imin3(int a, int b, int c) { int m = a < b ? a : b; return m < c ? m : c; }
-static int imax3(int a, int b, int c) { int m = a > b ? a : b; return m > c ? m : c; }
+/* Traversal state shared by every triangle rasterizer here, so the coverage
+   a fill produces and the coverage a walk reports can never drift apart.
 
-/* Geometry shared by every triangle traversal: winding normalized to
-   positive, bounding box clipped, and the three edge functions seeded at
-   the box's top-left corner with their top-left-rule biases folded in.
-   One definition so the coverage a fill produces and the coverage a walk
-   reports can never drift apart. Returns false when nothing is covered. */
+   Each w_* is one edge function, named for the edge it measures: w_bc is
+   the edge b->c, whose value is the barycentric weight of the OPPOSITE
+   corner, a. Reading a negative w_bc tells you directly which edge the
+   pixel fell outside of. */
 typedef struct {
-    int minx, miny, maxx, maxy;
-    int dx0, dy0, dx1, dy1, dx2, dy2;
-    int row0, row1, row2;          /* edge values WITH the fill-rule bias folded in */
-    int bias0, bias1, bias2;       /* subtract to recover the true barycentric weight */
-} tri_span_t;
-
-static bool tri_span_setup(int x0, int y0, int x1, int y1, int x2, int y2,
-                           int clip_w, int clip_h, tri_span_t *s) {
-    int area = edge(x0, y0, x1, y1, x2, y2);
-    if (area == 0) return false;                /* degenerate: no pixels */
-    if (area < 0) {                             /* normalize to positive winding */
-        int tx = x1, ty = y1;
-        x1 = x2; y1 = y2;
-        x2 = tx; y2 = ty;
-    }
-
-    s->minx = imin3(x0, x1, x2); s->maxx = imax3(x0, x1, x2);
-    s->miny = imin3(y0, y1, y2); s->maxy = imax3(y0, y1, y2);
-    if (s->minx < 0) s->minx = 0;
-    if (s->miny < 0) s->miny = 0;
-    if (s->maxx > clip_w - 1) s->maxx = clip_w - 1;
-    if (s->maxy > clip_h - 1) s->maxy = clip_h - 1;
-    if (s->minx > s->maxx || s->miny > s->maxy) return false;
-
-    /* Fold the fill rule into a per-edge bias so the inner test stays a
-       plain sign check: on-edge pixels (w == 0) survive only where the
-       edge owns them. */
-    int bias0 = edge_is_top_left(x1, y1, x2, y2) ? 0 : -1;
-    int bias1 = edge_is_top_left(x2, y2, x0, y0) ? 0 : -1;
-    int bias2 = edge_is_top_left(x0, y0, x1, y1) ? 0 : -1;
+    rect2d_t box;                        /* bounding box, clipped to the target */
 
     /* An edge function is linear in the pixel coordinate, so one step moves
        it by a constant: d/dx is -(by - ay), d/dy is (bx - ax). Evaluate the
-       three edges once at the bounding-box corner and add those deltas per
-       step — 3 adds per pixel instead of 6 multiplies, which measured 2.3x
-       faster on a half-screen opaque fill. The biases fold in at the corner
-       and ride along unchanged. */
-    s->dx0 = y1 - y2; s->dy0 = x2 - x1;
-    s->dx1 = y2 - y0; s->dy1 = x0 - x2;
-    s->dx2 = y0 - y1; s->dy2 = x1 - x0;
+       three edges once at the box corner and add these per step — 3 adds
+       per pixel instead of 6 multiplies, which measured 2.3x faster on a
+       half-screen opaque fill. */
+    int w_bc_dx, w_bc_dy;
+    int w_ca_dx, w_ca_dy;
+    int w_ab_dx, w_ab_dy;
 
-    s->row0 = edge(x1, y1, x2, y2, s->minx, s->miny) + bias0;
-    s->row1 = edge(x2, y2, x0, y0, s->minx, s->miny) + bias1;
-    s->row2 = edge(x0, y0, x1, y1, s->minx, s->miny) + bias2;
-    s->bias0 = bias0; s->bias1 = bias1; s->bias2 = bias2;
+    int w_bc_row, w_ca_row, w_ab_row;    /* value at the box's left edge, biased */
+    int bias_bc, bias_ca, bias_ab;       /* subtract to recover the true weight */
+} tri_span_t;
+
+static bool tri_span_setup(tri2d_t t, rect2d_t clip, tri_span_t *s) {
+    t = tri2d_to_positive(t);
+    if (tri2d_area2(t) == 0) return false;          /* degenerate: no pixels */
+
+    s->box = rect2d_intersect(tri2d_bounds(t), clip);
+    if (rect2d_is_empty(s->box)) return false;
+
+    /* Fold the fill rule into a per-edge bias so the inner test stays a
+       plain sign check: on-edge pixels (w == 0) survive only where the
+       edge owns them. The biases fold in at the corner and ride along
+       unchanged as the values step. */
+    s->bias_bc = edge_is_top_left(t.b, t.c) ? 0 : -1;
+    s->bias_ca = edge_is_top_left(t.c, t.a) ? 0 : -1;
+    s->bias_ab = edge_is_top_left(t.a, t.b) ? 0 : -1;
+
+    s->w_bc_dx = t.b.y - t.c.y;  s->w_bc_dy = t.c.x - t.b.x;
+    s->w_ca_dx = t.c.y - t.a.y;  s->w_ca_dy = t.a.x - t.c.x;
+    s->w_ab_dx = t.a.y - t.b.y;  s->w_ab_dy = t.b.x - t.a.x;
+
+    vec2_t corner = vec2(s->box.x, s->box.y);
+    s->w_bc_row = edge2d_side(t.b, t.c, corner) + s->bias_bc;
+    s->w_ca_row = edge2d_side(t.c, t.a, corner) + s->bias_ca;
+    s->w_ab_row = edge2d_side(t.a, t.b, corner) + s->bias_ab;
     return true;
 }
 
-static void triangle_fill_impl(platform_framebuffer_t *fb,
-                               int x0, int y0, int x1, int y1, int x2, int y2,
+static void triangle_fill_impl(platform_framebuffer_t *fb, tri2d_t t,
                                pcolor_t color, bool blend) {
     tri_span_t s;
-    if (!tri_span_setup(x0, y0, x1, y1, x2, y2, fb->width, fb->height, &s)) return;
+    if (!tri_span_setup(t, rect2d(0, 0, fb->width, fb->height), &s)) return;
 
     /* Lifted into locals so the inner loops stay exactly the arithmetic the
        vectorizer handled before this setup was shared. */
-    const int minx = s.minx, maxx = s.maxx;
-    const int dx0 = s.dx0, dx1 = s.dx1, dx2 = s.dx2;
-    const int dy0 = s.dy0, dy1 = s.dy1, dy2 = s.dy2;
-    int row0 = s.row0, row1 = s.row1, row2 = s.row2;
+    const int x0 = s.box.x, x1 = s.box.x + s.box.w - 1;
+    const int y0 = s.box.y, y1 = s.box.y + s.box.h - 1;
+    const int bc_dx = s.w_bc_dx, ca_dx = s.w_ca_dx, ab_dx = s.w_ab_dx;
+    const int bc_dy = s.w_bc_dy, ca_dy = s.w_ca_dy, ab_dy = s.w_ab_dy;
+    int bc_row = s.w_bc_row, ca_row = s.w_ca_row, ab_row = s.w_ab_row;
 
     /* Hoisted out of the loop on purpose: a uint32_t store may alias the
        int members of platform_framebuffer_t, so with fb coming from another
@@ -150,70 +135,65 @@ static void triangle_fill_impl(platform_framebuffer_t *fb,
        plain conditional store and clang does the edge math four pixels at a
        time (2.7x on a half-screen fill). */
     if (blend) {
-        for (int y = s.miny; y <= s.maxy; y++) {
-            int w0 = row0, w1 = row1, w2 = row2;
+        for (int y = y0; y <= y1; y++) {
+            int w_bc = bc_row, w_ca = ca_row, w_ab = ab_row;
             pcolor_t *px = &pixels[(size_t)y * (size_t)stride];
-            for (int x = minx; x <= maxx; x++) {
-                if ((w0 | w1 | w2) >= 0)        /* all three non-negative */
+            for (int x = x0; x <= x1; x++) {
+                if ((w_bc | w_ca | w_ab) >= 0)   /* all three non-negative */
                     px[x] = color_blend(px[x], color);
-                w0 += dx0; w1 += dx1; w2 += dx2;
+                w_bc += bc_dx; w_ca += ca_dx; w_ab += ab_dx;
             }
-            row0 += dy0; row1 += dy1; row2 += dy2;
+            bc_row += bc_dy; ca_row += ca_dy; ab_row += ab_dy;
         }
     } else {
-        for (int y = s.miny; y <= s.maxy; y++) {
-            int w0 = row0, w1 = row1, w2 = row2;
+        for (int y = y0; y <= y1; y++) {
+            int w_bc = bc_row, w_ca = ca_row, w_ab = ab_row;
             pcolor_t *px = &pixels[(size_t)y * (size_t)stride];
-            for (int x = minx; x <= maxx; x++) {
-                if ((w0 | w1 | w2) >= 0)
+            for (int x = x0; x <= x1; x++) {
+                if ((w_bc | w_ca | w_ab) >= 0)
                     px[x] = color;
-                w0 += dx0; w1 += dx1; w2 += dx2;
+                w_bc += bc_dx; w_ca += ca_dx; w_ab += ab_dx;
             }
-            row0 += dy0; row1 += dy1; row2 += dy2;
+            bc_row += bc_dy; ca_row += ca_dy; ab_row += ab_dy;
         }
     }
 }
 
-/* Same coverage as the fills, reported instead of written. Takes explicit
-   clip bounds because the target need not be a framebuffer — paint marks a
-   canvas-sized coverage mask with it. */
-bool draw2d_walk_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
-                          int clip_w, int clip_h, draw2d_pixel_fn fn, void *user_data) {
+bool draw2d_walk_triangle(tri2d_t t, rect2d_t clip,
+                          draw2d_pixel_fn on_pixel, void *user_data) {
     tri_span_t s;
-    if (!tri_span_setup(x0, y0, x1, y1, x2, y2, clip_w, clip_h, &s)) return false;
+    if (!tri_span_setup(t, clip, &s)) return false;
+
     bool any = false;
-    for (int y = s.miny; y <= s.maxy; y++) {
-        int w0 = s.row0, w1 = s.row1, w2 = s.row2;
-        for (int x = s.minx; x <= s.maxx; x++) {
-            if ((w0 | w1 | w2) >= 0) { fn(x, y, user_data); any = true; }
-            w0 += s.dx0; w1 += s.dx1; w2 += s.dx2;
+    for (int y = s.box.y; y < s.box.y + s.box.h; y++) {
+        int w_bc = s.w_bc_row, w_ca = s.w_ca_row, w_ab = s.w_ab_row;
+        for (int x = s.box.x; x < s.box.x + s.box.w; x++) {
+            if ((w_bc | w_ca | w_ab) >= 0) { on_pixel(x, y, user_data); any = true; }
+            w_bc += s.w_bc_dx; w_ca += s.w_ca_dx; w_ab += s.w_ab_dx;
         }
-        s.row0 += s.dy0; s.row1 += s.dy1; s.row2 += s.dy2;
+        s.w_bc_row += s.w_bc_dy; s.w_ca_row += s.w_ca_dy; s.w_ab_row += s.w_ab_dy;
     }
     return any;
 }
 
-void draw2d_triangle_fill(platform_framebuffer_t *fb,
-                          int x0, int y0, int x1, int y1, int x2, int y2, pcolor_t color) {
-    triangle_fill_impl(fb, x0, y0, x1, y1, x2, y2, color, false);
+void draw2d_triangle_fill(platform_framebuffer_t *fb, tri2d_t t, pcolor_t color) {
+    triangle_fill_impl(fb, t, color, false);
 }
 
-void draw2d_triangle_fill_blend(platform_framebuffer_t *fb,
-                                int x0, int y0, int x1, int y1, int x2, int y2,
-                                pcolor_t color) {
-    triangle_fill_impl(fb, x0, y0, x1, y1, x2, y2, color, true);
+void draw2d_triangle_fill_blend(platform_framebuffer_t *fb, tri2d_t t, pcolor_t color) {
+    triangle_fill_impl(fb, t, color, true);
 }
 
 void draw2d_triangle_fill_gradient(platform_framebuffer_t *fb,
-                             vertex2d_t a, vertex2d_t b, vertex2d_t c) {
+                                   vertex2d_t a, vertex2d_t b, vertex2d_t c) {
     /* Normalize winding HERE rather than leaving it to tri_span_setup: the
        colours have to travel with their corners, and a swap hidden inside
        setup would pair each weight with the wrong vertex. */
     if (edge2d_side(a.pos, b.pos, c.pos) < 0) { vertex2d_t t = b; b = c; c = t; }
 
     tri_span_t s;
-    if (!tri_span_setup(a.pos.x, a.pos.y, b.pos.x, b.pos.y, c.pos.x, c.pos.y,
-                        fb->width, fb->height, &s)) return;
+    if (!tri_span_setup(tri2d(a.pos, b.pos, c.pos),
+                        rect2d(0, 0, fb->width, fb->height), &s)) return;
 
     /* The three unbiased weights sum to twice the area at every pixel, so
        the divisor is a constant rather than a per-pixel sum. */
@@ -223,22 +203,25 @@ void draw2d_triangle_fill_gradient(platform_framebuffer_t *fb,
     pcolor_t *pixels = pcolor_pixels(fb->pixels);
     int       stride = fb->width;
 
-    for (int y = s.miny; y <= s.maxy; y++) {
-        int w0 = s.row0, w1 = s.row1, w2 = s.row2;
+    for (int y = s.box.y; y < s.box.y + s.box.h; y++) {
+        int w_bc = s.w_bc_row, w_ca = s.w_ca_row, w_ab = s.w_ab_row;
         pcolor_t *px = &pixels[(size_t)y * (size_t)stride];
-        for (int x = s.minx; x <= s.maxx; x++) {
-            if ((w0 | w1 | w2) >= 0) {
-                /* coverage used the biased values; interpolation needs the true ones */
-                i64 t0 = w0 - s.bias0, t1 = w1 - s.bias1, t2 = w2 - s.bias2;
+        for (int x = s.box.x; x < s.box.x + s.box.w; x++) {
+            if ((w_bc | w_ca | w_ab) >= 0) {
+                /* coverage used the biased values; interpolation needs the
+                   true weights, so the biases come back out here */
+                i64 wa = w_bc - s.bias_bc;   /* weight of corner a */
+                i64 wb = w_ca - s.bias_ca;   /* weight of corner b */
+                i64 wc = w_ab - s.bias_ab;   /* weight of corner c */
                 pcolor_t src;
-                src.r = (u8)((t0*a.color.r + t1*b.color.r + t2*c.color.r) / total);
-                src.g = (u8)((t0*a.color.g + t1*b.color.g + t2*c.color.g) / total);
-                src.b = (u8)((t0*a.color.b + t1*b.color.b + t2*c.color.b) / total);
-                src.a = (u8)((t0*a.color.a + t1*b.color.a + t2*c.color.a) / total);
+                src.r = (u8)((wa*a.color.r + wb*b.color.r + wc*c.color.r) / total);
+                src.g = (u8)((wa*a.color.g + wb*b.color.g + wc*c.color.g) / total);
+                src.b = (u8)((wa*a.color.b + wb*b.color.b + wc*c.color.b) / total);
+                src.a = (u8)((wa*a.color.a + wb*b.color.a + wc*c.color.a) / total);
                 px[x] = color_blend(px[x], src);
             }
-            w0 += s.dx0; w1 += s.dx1; w2 += s.dx2;
+            w_bc += s.w_bc_dx; w_ca += s.w_ca_dx; w_ab += s.w_ab_dx;
         }
-        s.row0 += s.dy0; s.row1 += s.dy1; s.row2 += s.dy2;
+        s.w_bc_row += s.w_bc_dy; s.w_ca_row += s.w_ca_dy; s.w_ab_row += s.w_ab_dy;
     }
 }
