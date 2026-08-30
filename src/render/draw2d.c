@@ -77,7 +77,8 @@ static int imax3(int a, int b, int c) { int m = a > b ? a : b; return m > c ? m 
 typedef struct {
     int minx, miny, maxx, maxy;
     int dx0, dy0, dx1, dy1, dx2, dy2;
-    int row0, row1, row2;
+    int row0, row1, row2;          /* edge values WITH the fill-rule bias folded in */
+    int bias0, bias1, bias2;       /* subtract to recover the true barycentric weight */
 } tri_span_t;
 
 static bool tri_span_setup(int x0, int y0, int x1, int y1, int x2, int y2,
@@ -118,6 +119,7 @@ static bool tri_span_setup(int x0, int y0, int x1, int y1, int x2, int y2,
     s->row0 = edge(x1, y1, x2, y2, s->minx, s->miny) + bias0;
     s->row1 = edge(x2, y2, x0, y0, s->minx, s->miny) + bias1;
     s->row2 = edge(x0, y0, x1, y1, s->minx, s->miny) + bias2;
+    s->bias0 = bias0; s->bias1 = bias1; s->bias2 = bias2;
     return true;
 }
 
@@ -200,4 +202,43 @@ void draw2d_triangle_fill_blend(platform_framebuffer_t *fb,
                                 int x0, int y0, int x1, int y1, int x2, int y2,
                                 pcolor_t color) {
     triangle_fill_impl(fb, x0, y0, x1, y1, x2, y2, color, true);
+}
+
+void draw2d_triangle_fill_gradient(platform_framebuffer_t *fb,
+                             vertex2d_t a, vertex2d_t b, vertex2d_t c) {
+    /* Normalize winding HERE rather than leaving it to tri_span_setup: the
+       colours have to travel with their corners, and a swap hidden inside
+       setup would pair each weight with the wrong vertex. */
+    if (edge2d_side(a.pos, b.pos, c.pos) < 0) { vertex2d_t t = b; b = c; c = t; }
+
+    tri_span_t s;
+    if (!tri_span_setup(a.pos.x, a.pos.y, b.pos.x, b.pos.y, c.pos.x, c.pos.y,
+                        fb->width, fb->height, &s)) return;
+
+    /* The three unbiased weights sum to twice the area at every pixel, so
+       the divisor is a constant rather than a per-pixel sum. */
+    const i64 total = (i64)edge2d_side(a.pos, b.pos, c.pos);
+    if (total == 0) return;
+
+    pcolor_t *pixels = pcolor_pixels(fb->pixels);
+    int       stride = fb->width;
+
+    for (int y = s.miny; y <= s.maxy; y++) {
+        int w0 = s.row0, w1 = s.row1, w2 = s.row2;
+        pcolor_t *px = &pixels[(size_t)y * (size_t)stride];
+        for (int x = s.minx; x <= s.maxx; x++) {
+            if ((w0 | w1 | w2) >= 0) {
+                /* coverage used the biased values; interpolation needs the true ones */
+                i64 t0 = w0 - s.bias0, t1 = w1 - s.bias1, t2 = w2 - s.bias2;
+                pcolor_t src;
+                src.r = (u8)((t0*a.color.r + t1*b.color.r + t2*c.color.r) / total);
+                src.g = (u8)((t0*a.color.g + t1*b.color.g + t2*c.color.g) / total);
+                src.b = (u8)((t0*a.color.b + t1*b.color.b + t2*c.color.b) / total);
+                src.a = (u8)((t0*a.color.a + t1*b.color.a + t2*c.color.a) / total);
+                px[x] = color_blend(px[x], src);
+            }
+            w0 += s.dx0; w1 += s.dx1; w2 += s.dx2;
+        }
+        s.row0 += s.dy0; s.row1 += s.dy1; s.row2 += s.dy2;
+    }
 }

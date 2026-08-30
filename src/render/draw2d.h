@@ -3,9 +3,19 @@
 
 #include "platform/platform.h"
 #include "render/color.h"
+#include "render/geom.h"
 
 /* 2D primitives in screen space. Integer pixel coordinates, top-left
    origin. Everything is clipped to the framebuffer bounds. */
+
+/* A corner with its shading attributes attached. Position lives in vec2_t
+   because most points in the codebase carry no colour at all; a vertex is
+   the thing that does. Later attributes (depth, UV) attach here too, which
+   is why this is a separate type rather than a fatter point. */
+typedef struct {
+    vec2_t   pos;
+    pcolor_t color;      /* premultiplied — see the interpolation note below */
+} vertex2d_t;
 
 /* Callback receiving each pixel a rasterizer visits, in order. */
 typedef void (*draw2d_pixel_fn)(int x, int y, void *user_data);
@@ -49,5 +59,22 @@ void draw2d_triangle_fill(platform_framebuffer_t *fb,
 void draw2d_triangle_fill_blend(platform_framebuffer_t *fb,
                                 int x0, int y0, int x1, int y1, int x2, int y2,
                                 pcolor_t color);
+
+/* Triangle with a colour per corner, blended smoothly across the interior.
+   Known formally as Gouraud shading, after the 1971 paper; named for what
+   it does here because that is what the call site needs to convey.
+   Coverage and the top-left fill rule are identical to
+   draw2d_triangle_fill_blend — only the colour varies per pixel.
+
+   The weights are the three edge functions normalized by the triangle's
+   area, so a pixel two thirds of the way to corner b gets two thirds of
+   b's colour. Interpolation happens in PREMULTIPLIED space, which is the
+   representation that survives it: blending straight-alpha colours would
+   let a transparent corner drag its RGB into its neighbours.
+
+   Accumulates in i64. The weights scale with triangle AREA, so a
+   full-screen triangle times a 255 channel overflows i32. */
+void draw2d_triangle_fill_gradient(platform_framebuffer_t *fb,
+                             vertex2d_t a, vertex2d_t b, vertex2d_t c);
 
 #endif /* DRAW2D_H */
