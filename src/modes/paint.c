@@ -258,22 +258,22 @@ static void stroke_composite(paint_state_t *st) {
     stroke_reset(st);
 }
 
-static void stamp_cb(int x, int y, void *ud) {
-    apply_tool_at(ud, vec2(x, y));
+static void stamp_tool_pixel(int x, int y, void *state) {
+    apply_tool_at(state, vec2(x, y));
 }
 
 /* Stamp the tool along a Bresenham line — fills pixel gaps when the
    mouse moves faster than one event per pixel. Without this, fast
    strokes leave a string of dots instead of a continuous line. */
 static void apply_tool_stroke(paint_state_t *st, line2d_t l) {
-    draw2d_walk_line(l.a.x, l.a.y, l.b.x, l.b.y, stamp_cb, st);
+    draw2d_walk_line(l, stamp_tool_pixel, st);
 }
 
 /* Mark a single covered pixel. The shape rasterizers report interior
    coverage one pixel at a time; the brush footprint applies to the outline
    tools only, so this stamps width 1. */
-static void mark_px_cb(int x, int y, void *ud) {
-    stamp_square(ud, vec2(x, y), 1);
+static void mark_coverage_pixel(int x, int y, void *state) {
+    stamp_square(state, vec2(x, y), 1);
 }
 
 /* Shapes are re-marked from scratch whenever their geometry changes, so the
@@ -294,8 +294,9 @@ static void triangle_mark_full(paint_state_t *st) {
     const vec2_t *p = st->tri;
     /* Clipped to the canvas, so corners dragged into the letterbox are cut. */
     if (st->tool == TOOL_TRIANGLE
-        && draw2d_walk_triangle(p[0].x, p[0].y, p[1].x, p[1].y, p[2].x, p[2].y,
-                                st->canvas_w, st->canvas_h, mark_px_cb, st))
+        && draw2d_walk_triangle(tri2d(p[0], p[1], p[2]),
+                                rect2d(0, 0, st->canvas_w, st->canvas_h),
+                                mark_coverage_pixel, st))
         return;
 
     /* Outline, for the wire tool and for a filled triangle with no interior.

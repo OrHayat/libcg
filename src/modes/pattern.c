@@ -88,32 +88,29 @@ static void render_primitives(platform_framebuffer_t *fb) {
             int ex = cx + (int)(cos(a) * r);
             int ey = cy + (int)(sin(a) * r);
             u8 v = (u8)(80 + (i * 175) / 24);
-            draw2d_line(fb, cx, cy, ex, ey, PCOLOR_RGB(v, v, 255 - v));
+            draw2d_line(fb, line2d(vec2(cx, cy), vec2(ex, ey)), PCOLOR_RGB(v, v, 255 - v));
         }
     }
 
     /* --- TR: wireframe triangle --- */
     {
         int ox = qw;
-        draw2d_triangle_wire(fb,
-                             ox + qw / 2, m,
-                             ox + qw - m, qh - m,
-                             ox + m,      qh - m,
+        draw2d_triangle_wire(fb, tri2d(vec2(ox + qw / 2, m),
+                                       vec2(ox + qw - m, qh - m),
+                                       vec2(ox + m,      qh - m)),
                              PCOLOR_RGB(255, 255, 255));
     }
 
     /* --- BL: overlapping fills --- */
     {
         int oy = qh;
-        draw2d_triangle_fill(fb,
-                             m,          oy + m,
-                             qw - m,     oy + qh / 2,
-                             qw / 2,     oy + qh - m,
+        draw2d_triangle_fill(fb, tri2d(vec2(m,      oy + m),
+                                       vec2(qw - m, oy + qh / 2),
+                                       vec2(qw / 2, oy + qh - m)),
                              PCOLOR_RGB(220, 60, 60));
-        draw2d_triangle_fill(fb,
-                             qw - m,     oy + m,
-                             qw / 2 + m, oy + qh - m,
-                             m,          oy + qh / 2,
+        draw2d_triangle_fill(fb, tri2d(vec2(qw - m,     oy + m),
+                                       vec2(qw / 2 + m, oy + qh - m),
+                                       vec2(m,          oy + qh / 2)),
                              PCOLOR_RGB(60, 200, 90));
     }
 
@@ -122,8 +119,8 @@ static void render_primitives(platform_framebuffer_t *fb) {
         int ox = qw, oy = qh;
         int x0 = ox + m,      y0 = oy + m;
         int x1 = ox + qw - m, y1 = oy + qh - m;
-        draw2d_triangle_fill(fb, x0, y0, x1, y0, x0, y1, PCOLOR_RGB(70, 110, 230));
-        draw2d_triangle_fill(fb, x1, y0, x1, y1, x0, y1, PCOLOR_RGB(240, 160, 40));
+        draw2d_triangle_fill(fb, tri2d(vec2(x0,y0), vec2(x1,y0), vec2(x0,y1)), PCOLOR_RGB(70, 110, 230));
+        draw2d_triangle_fill(fb, tri2d(vec2(x1,y0), vec2(x1,y1), vec2(x0,y1)), PCOLOR_RGB(240, 160, 40));
     }
 }
 
