@@ -349,10 +349,18 @@ static void print_tool(const paint_state_t *st) {
         printf("tool: %s (size %d)\n", tool_name(st->tool), st->brush_size);
 }
 
+static void cancel_pending(paint_state_t *st);
+
+/* Switching tools ends whatever was in flight. cancel_pending runs *before*
+   st->tool changes: it composites an in-progress freehand stroke, and
+   stroke_composite reads the colour and width from tool_footprint, so
+   switching first would commit the stroke in the new tool's colour.
+   Clearing only line_active/tri_n here used to leave the mask marked, and
+   frame() kept blitting that dead rubber-band every frame until an
+   unrelated click happened to reset it. */
 static void set_tool(paint_state_t *st, paint_tool_t t) {
-    st->tool        = t;
-    st->line_active = false;      /* drop any half-placed shape */
-    st->tri_n       = 0;
+    cancel_pending(st);
+    st->tool = t;
     print_tool(st);
 }
 
@@ -509,11 +517,22 @@ static void event(app_mode_t *m, const platform_event_t *e) {
         case PLATFORM_KEY_ESCAPE:
             if (st->line_active) { st->line_active = false; printf("line cancelled\n"); }
             if (st->tri_n)       { st->tri_n = 0;           printf("triangle cancelled\n"); }
+            /* A freehand stroke has to end here too. Leaving painting set
+               kept the stroke live with its mask already discarded, so the
+               next mouse move resumed stamping from the stale last_c* and
+               drew a segment from wherever the cursor sat at Esc. */
+            st->painting = false;
+            st->last_cx  = -1;
+            st->last_cy  = -1;
             stroke_reset(st);          /* discard the uncommitted preview */
             break;
         case PLATFORM_KEY_LEFT_BRACKET:  adjust_size(st, -1); break;
         case PLATFORM_KEY_RIGHT_BRACKET: adjust_size(st, +1); break;
         case PLATFORM_KEY_C:
+            /* Ends the pending stroke first: without this the mask outlived
+               the clear and composited itself onto the fresh canvas on
+               release, so "clear" left a stroke behind. */
+            cancel_pending(st);
             canvas_clear(st);
             printf("canvas cleared\n");
             break;
