@@ -2,6 +2,7 @@
 #include "render/color.h"
 #include "render/draw2d.h"
 #include "render/framebuffer.h"
+#include "render/geom.h"
 #include "util/image.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,20 +30,19 @@ typedef struct {
     int          brush_size;        /* 1..32, default 5 */
     color_t      color;             /* straight, from the shell's # input */
     bool         painting;          /* mouse held during a stroke */
-    int          last_cx, last_cy;  /* prev stroke point in canvas coords; -1 = none */
+    vec2_t       last;              /* prev stroke point, canvas coords; x < 0 = none */
 
     /* line tool: rubber-band from anchor to cursor while the button is
        held; committed to the canvas on release. Coords may lie outside
        the canvas — stamping clips per pixel. */
     bool         line_active;
-    int          line_x0, line_y0;
-    int          line_x1, line_y1;
+    line2d_t     line;              /* a = anchor, b = cursor */
 
     /* triangle tool: click-click-click. tri_n counts committed corners
        (0..2); slot [tri_n] tracks the cursor so the rubber-band preview
        always has a live third point. The 3rd click commits and resets. */
     int          tri_n;
-    int          tri_x[3], tri_y[3];
+    vec2_t       tri[3];
 
     /* Stroke coverage mask, canvas-sized. Tools mark coverage here rather
        than drawing onto the canvas, and the whole mask is composited in one
@@ -64,10 +64,9 @@ typedef struct {
 /* Letterbox offset of the canvas inside the framebuffer. Single source
    of truth — render, hit-testing and the line preview all use it, so
    the cursor always lands exactly on the painted pixel. */
-static void canvas_offset(const platform_framebuffer_t *fb, const paint_state_t *st,
-                          int *off_x, int *off_y) {
-    *off_x = (fb->width  - st->canvas_w) / 2;
-    *off_y = (fb->height - st->canvas_h) / 2;
+static vec2_t canvas_offset(const platform_framebuffer_t *fb, const paint_state_t *st) {
+    return vec2((fb->width  - st->canvas_w) / 2,
+                (fb->height - st->canvas_h) / 2);
 }
 
 /* Fill a size×size square anchored on (cx,cy) into any pixel grid, clipped
@@ -78,9 +77,9 @@ static void canvas_offset(const platform_framebuffer_t *fb, const paint_state_t 
 
    Marks coverage only — the color is applied later, once, by
    stroke_composite. */
-static void stamp_square(paint_state_t *st, int cx, int cy, int size) {
-    int x0 = cx - (size - 1) / 2, x1 = x0 + size - 1;
-    int y0 = cy - (size - 1) / 2, y1 = y0 + size - 1;
+static void stamp_square(paint_state_t *st, vec2_t c, int size) {
+    int x0 = c.x - (size - 1) / 2, x1 = x0 + size - 1;
+    int y0 = c.y - (size - 1) / 2, y1 = y0 + size - 1;
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
     if (x1 >= st->canvas_w) x1 = st->canvas_w - 1;
@@ -147,8 +146,8 @@ static void render_canvas(platform_framebuffer_t *fb, const paint_state_t *st) {
     framebuffer_clear(fb, PCOLOR_RGB(48, 48, 48));
     if (!canvas) return;
 
-    int off_x, off_y;
-    canvas_offset(fb, st, &off_x, &off_y);
+    vec2_t off = canvas_offset(fb, st);
+    int off_x = off.x, off_y = off.y;
 
     int dst_x0 = off_x < 0 ? 0 : off_x;
     int dst_y0 = off_y < 0 ? 0 : off_y;
@@ -218,19 +217,14 @@ static const char *tool_name(paint_tool_t t) {
    (possibly out-of-range) coords; returns whether they're inside the
    canvas rather than in the gray bars. */
 static bool mouse_to_canvas(const paint_state_t *st, int mouse_x, int mouse_y,
-                            int *out_cx, int *out_cy) {
+                            vec2_t *out) {
     /* Only width/height are read here — safe outside frame_cb. */
     platform_framebuffer_t *fb = platform_get_framebuffer();
     double scale = platform_get_dpi_scale();
-    int fb_x = (int)(mouse_x * scale);
-    int fb_y = (int)(mouse_y * scale);
+    vec2_t fb_p = vec2((int)(mouse_x * scale), (int)(mouse_y * scale));
 
-    int off_x, off_y;
-    canvas_offset(fb, st, &off_x, &off_y);
-    *out_cx = fb_x - off_x;
-    *out_cy = fb_y - off_y;
-    return *out_cx >= 0 && *out_cx < st->canvas_w
-        && *out_cy >= 0 && *out_cy < st->canvas_h;
+    *out = vec2_sub(fb_p, canvas_offset(fb, st));
+    return rect2d_contains(rect2d(0, 0, st->canvas_w, st->canvas_h), *out);
 }
 
 /* Footprint of the current tool: the premultiplied color it lays down and
@@ -247,11 +241,11 @@ static void tool_footprint(const paint_state_t *st, pcolor_t *color, int *size) 
 
 /* Mark the current tool's footprint at canvas-pixel (cx, cy). Out-of-bounds
    pixels are clipped, not wrapped. */
-static void apply_tool_at(paint_state_t *st, int cx, int cy) {
+static void apply_tool_at(paint_state_t *st, vec2_t p) {
     pcolor_t color; int size;
     tool_footprint(st, &color, &size);
     (void)color;                      /* coverage now; stroke_composite applies it */
-    stamp_square(st, cx, cy, size);
+    stamp_square(st, p, size);
 }
 
 /* Lay the finished stroke onto the canvas in a single composite, then clear
@@ -265,21 +259,21 @@ static void stroke_composite(paint_state_t *st) {
 }
 
 static void stamp_cb(int x, int y, void *ud) {
-    apply_tool_at(ud, x, y);
+    apply_tool_at(ud, vec2(x, y));
 }
 
 /* Stamp the tool along a Bresenham line — fills pixel gaps when the
    mouse moves faster than one event per pixel. Without this, fast
    strokes leave a string of dots instead of a continuous line. */
-static void apply_tool_stroke(paint_state_t *st, int x0, int y0, int x1, int y1) {
-    draw2d_walk_line(x0, y0, x1, y1, stamp_cb, st);
+static void apply_tool_stroke(paint_state_t *st, line2d_t l) {
+    draw2d_walk_line(l.a.x, l.a.y, l.b.x, l.b.y, stamp_cb, st);
 }
 
 /* Mark a single covered pixel. The shape rasterizers report interior
    coverage one pixel at a time; the brush footprint applies to the outline
    tools only, so this stamps width 1. */
 static void mark_px_cb(int x, int y, void *ud) {
-    stamp_square(ud, x, y, 1);
+    stamp_square(ud, vec2(x, y), 1);
 }
 
 /* Shapes are re-marked from scratch whenever their geometry changes, so the
@@ -288,7 +282,7 @@ static void mark_px_cb(int x, int y, void *ud) {
    exactly what lands on the canvas. */
 static void line_remark(paint_state_t *st) {
     stroke_reset(st);
-    draw2d_walk_line(st->line_x0, st->line_y0, st->line_x1, st->line_y1, stamp_cb, st);
+    apply_tool_stroke(st, st->line);
 }
 
 /* The complete three-corner shape: interior for TOOL_TRIANGLE, outline for
@@ -297,10 +291,10 @@ static void line_remark(paint_state_t *st) {
    fill. Marking coverage rather than blending keeps the fill single-blended
    exactly as the direct rasterizer call did. */
 static void triangle_mark_full(paint_state_t *st) {
-    const int *x = st->tri_x, *y = st->tri_y;
+    const vec2_t *p = st->tri;
     /* Clipped to the canvas, so corners dragged into the letterbox are cut. */
     if (st->tool == TOOL_TRIANGLE
-        && draw2d_walk_triangle(x[0], y[0], x[1], y[1], x[2], y[2],
+        && draw2d_walk_triangle(p[0].x, p[0].y, p[1].x, p[1].y, p[2].x, p[2].y,
                                 st->canvas_w, st->canvas_h, mark_px_cb, st))
         return;
 
@@ -310,17 +304,16 @@ static void triangle_mark_full(paint_state_t *st) {
        corner lands and whenever the cursor crosses the line through the other
        two. Marking nothing there would blink the rubber-band out instead of
        degenerating to the line the shape actually is. */
-    apply_tool_stroke(st, x[0], y[0], x[1], y[1]);
-    apply_tool_stroke(st, x[1], y[1], x[2], y[2]);
-    apply_tool_stroke(st, x[2], y[2], x[0], y[0]);
+    apply_tool_stroke(st, line2d(p[0], p[1]));
+    apply_tool_stroke(st, line2d(p[1], p[2]));
+    apply_tool_stroke(st, line2d(p[2], p[0]));
 }
 
 static void triangle_remark(paint_state_t *st) {
     stroke_reset(st);
-    const int *x = st->tri_x, *y = st->tri_y;
     /* One corner placed: no interior exists yet, so track the cursor with a
        plain edge whichever triangle tool is selected. */
-    if (st->tri_n == 1)      apply_tool_stroke(st, x[0], y[0], x[1], y[1]);
+    if (st->tri_n == 1)      apply_tool_stroke(st, line2d(st->tri[0], st->tri[1]));
     else if (st->tri_n == 2) triangle_mark_full(st);
 }
 
@@ -482,8 +475,7 @@ static void init(app_mode_t *m) {
     st->tool       = TOOL_PENCIL;
     st->brush_size = 5;
     st->color      = COLOR_RGB(0xFF, 0x88, 0x00);   /* default orange */
-    st->last_cx    = -1;
-    st->last_cy    = -1;
+    st->last       = vec2(-1, -1);
 
     /* Canvas at startup framebuffer size (retina-aware). Survives all
        window resizes; the window is just a viewport onto it. */
@@ -527,11 +519,10 @@ static void event(app_mode_t *m, const platform_event_t *e) {
             if (st->tri_n)       { st->tri_n = 0;           printf("triangle cancelled\n"); }
             /* A freehand stroke has to end here too. Leaving painting set
                kept the stroke live with its mask already discarded, so the
-               next mouse move resumed stamping from the stale last_c* and
+               next mouse move resumed stamping from the stale st->last and
                drew a segment from wherever the cursor sat at Esc. */
             st->painting = false;
-            st->last_cx  = -1;
-            st->last_cy  = -1;
+            st->last     = vec2(-1, -1);
             stroke_reset(st);          /* discard the uncommitted preview */
             break;
         case PLATFORM_KEY_LEFT_BRACKET:  adjust_size(st, -1); break;
@@ -552,20 +543,18 @@ static void event(app_mode_t *m, const platform_event_t *e) {
 
     case PLATFORM_EV_MOUSE_DOWN: {
         if (e->mouse.btn != PLATFORM_MOUSE_LEFT) break;
-        int cx, cy;
-        bool inside = mouse_to_canvas(st, e->mouse.x, e->mouse.y, &cx, &cy);
+        vec2_t p;
+        bool inside = mouse_to_canvas(st, e->mouse.x, e->mouse.y, &p);
 
         /* Corners may be placed anywhere, including the letterbox — the
            rasterizer clips to the canvas on commit. */
         if (tool_is_triangle(st->tool)) {
-            st->tri_x[st->tri_n] = cx;
-            st->tri_y[st->tri_n] = cy;
+            st->tri[st->tri_n] = p;
             st->tri_n++;
             if (st->tri_n == 3) {
                 triangle_commit(st);
             } else {
-                st->tri_x[st->tri_n] = cx;   /* seed live corner */
-                st->tri_y[st->tri_n] = cy;
+                st->tri[st->tri_n] = p;      /* seed live corner */
                 triangle_remark(st);
             }
             break;
@@ -574,22 +563,20 @@ static void event(app_mode_t *m, const platform_event_t *e) {
         if (!inside) break;
         if (st->tool == TOOL_LINE) {
             st->line_active = true;
-            st->line_x0 = st->line_x1 = cx;
-            st->line_y0 = st->line_y1 = cy;
+            st->line = line2d(p, p);
             line_remark(st);
             break;
         }
         st->painting = true;
-        st->last_cx  = cx;
-        st->last_cy  = cy;
+        st->last     = p;
         stroke_reset(st);              /* one mask per freehand stroke */
-        apply_tool_at(st, cx, cy);
+        apply_tool_at(st, p);
     } break;
 
     case PLATFORM_EV_MOUSE_UP:
         if (e->mouse.btn != PLATFORM_MOUSE_LEFT) break;
         if (st->line_active) {
-            mouse_to_canvas(st, e->mouse.x, e->mouse.y, &st->line_x1, &st->line_y1);
+            mouse_to_canvas(st, e->mouse.x, e->mouse.y, &st->line.b);
             line_commit(st);
         } else if (st->painting) {
             stroke_composite(st);      /* the stroke reaches the canvas here */
@@ -600,31 +587,28 @@ static void event(app_mode_t *m, const platform_event_t *e) {
     case PLATFORM_EV_MOUSE_MOVE: {
         if (tool_is_triangle(st->tool)) {
             if (st->tri_n > 0) {
-                mouse_to_canvas(st, e->move.x, e->move.y,
-                                &st->tri_x[st->tri_n], &st->tri_y[st->tri_n]);
+                mouse_to_canvas(st, e->move.x, e->move.y, &st->tri[st->tri_n]);
                 triangle_remark(st);
             }
             break;
         }
         if (st->line_active) {
-            mouse_to_canvas(st, e->move.x, e->move.y, &st->line_x1, &st->line_y1);
+            mouse_to_canvas(st, e->move.x, e->move.y, &st->line.b);
             line_remark(st);
             break;
         }
         if (!st->painting) break;
-        int cx, cy;
-        if (!mouse_to_canvas(st, e->move.x, e->move.y, &cx, &cy)) {
+        vec2_t p;
+        if (!mouse_to_canvas(st, e->move.x, e->move.y, &p)) {
             /* Cursor left the canvas mid-stroke — drop the segment but
                don't end the stroke; re-entry starts fresh from the new
                position rather than drawing a line across the gap. */
-            st->last_cx = -1;
-            st->last_cy = -1;
+            st->last.x = -1;
             break;
         }
-        if (st->last_cx < 0) apply_tool_at(st, cx, cy);
-        else                 apply_tool_stroke(st, st->last_cx, st->last_cy, cx, cy);
-        st->last_cx = cx;
-        st->last_cy = cy;
+        if (st->last.x < 0) apply_tool_at(st, p);
+        else                apply_tool_stroke(st, line2d(st->last, p));
+        st->last = p;
     } break;
 
     default:
@@ -640,12 +624,11 @@ static void frame(app_mode_t *m, platform_framebuffer_t *fb) {
        draw it over the canvas to show it in progress. Same mask, same
        single blend — the preview matches the final result exactly. */
     if (!stroke_is_empty(st)) {
-        int off_x, off_y;
-        canvas_offset(fb, st, &off_x, &off_y);
+        vec2_t off = canvas_offset(fb, st);
         pcolor_t color; int size;
         tool_footprint(st, &color, &size);
         stroke_blit(st, pcolor_pixels(fb->pixels), fb->width, fb->height,
-                    off_x, off_y, color);
+                    off.x, off.y, color);
     }
 }
 
