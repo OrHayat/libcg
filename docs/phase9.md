@@ -20,6 +20,11 @@ Add Win32 and X11 (and optionally Wayland) platform backends. Same renderer code
 - `QueryPerformanceCounter` / `QueryPerformanceFrequency` for time
 - `SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)` for multi-monitor DPI
 - Handle `WM_DPICHANGED` for monitor transitions
+- `wingdi.h` defines its own `RGB` (`0x00BBGGRR`), colliding with `util/common.h`'s
+  (`0xAARRGGBB`). Harmless while this file stays clear of `common.h` — `platform.h`
+  does not pull it in. If the backend ever needs `render/color.h` or `util/image.h`,
+  rename ours to `CG_RGB`/`CG_RGBA` first: whichever definition loses is silently
+  wrong, not a build error.
 
 ## X11
 

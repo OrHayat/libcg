@@ -37,10 +37,25 @@ typedef union { COLOR_MEMBERS_; } color_t;    /* straight       */
 typedef union { COLOR_MEMBERS_; } pcolor_t;   /* premultiplied  */
 
 /* Constructors. An opaque colour is identical in both representations,
-   so PCOLOR_RGB needs no conversion step. */
-#define COLOR_RGB(r, g, b)      ((color_t){  .rgba = RGB(r, g, b) })
-#define COLOR_RGBA(r, g, b, a)  ((color_t){  .rgba = RGBA(r, g, b, a) })
-#define PCOLOR_RGB(r, g, b)     ((pcolor_t){ .rgba = RGB(r, g, b) })
+   so PCOLOR_RGB needs no conversion step.
+
+   Two forms of each. The _INIT form is a brace initialiser, and is the
+   only one usable for an object with static storage duration: C requires
+   those initialisers to be constant expressions and a compound literal is
+   not one. clang and GCC allow it there as an extension, silently even
+   under -Wpedantic, so a static table built from the expression form
+   compiles here and fails on MSVC. The expression form is the _INIT form
+   with a cast in front, so the two cannot drift apart.
+
+   An _INIT macro cannot be passed as an argument to another macro: the
+   preprocessor splits arguments on the commas inside the brace list. */
+#define COLOR_RGB_INIT(r, g, b)      { .rgba = RGB(r, g, b) }
+#define COLOR_RGBA_INIT(r, g, b, a)  { .rgba = RGBA(r, g, b, a) }
+#define PCOLOR_RGB_INIT(r, g, b)     { .rgba = RGB(r, g, b) }
+
+#define COLOR_RGB(r, g, b)      ((color_t)COLOR_RGB_INIT(r, g, b))
+#define COLOR_RGBA(r, g, b, a)  ((color_t)COLOR_RGBA_INIT(r, g, b, a))
+#define PCOLOR_RGB(r, g, b)     ((pcolor_t)PCOLOR_RGB_INIT(r, g, b))
 #define PCOLOR_CLEAR            ((pcolor_t){ .rgba = 0 })          /* fully transparent */
 
 /* The framebuffer is a plain u32 buffer: platform.h deliberately knows

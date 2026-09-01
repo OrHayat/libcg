@@ -10,15 +10,15 @@
 #define SWATCH_W 14
 #define CLOSE_W  10
 
-static const pcolor_t COL_PANEL  = { .rgba = RGB(0x2A, 0x2E, 0x38) };
-static const pcolor_t COL_TITLE  = { .rgba = RGB(0x3A, 0x40, 0x4E) };
-static const pcolor_t COL_EDGE   = { .rgba = RGB(0x15, 0x17, 0x1D) };
-static const pcolor_t COL_BTN    = { .rgba = RGB(0x44, 0x4B, 0x5A) };
-static const pcolor_t COL_HOT    = { .rgba = RGB(0x57, 0x60, 0x72) };
-static const pcolor_t COL_DOWN   = { .rgba = RGB(0x24, 0x29, 0x33) };
-static const pcolor_t COL_ON     = { .rgba = RGB(0x2E, 0x7D, 0xD1) };
-static const pcolor_t COL_TEXT   = { .rgba = RGB(0xEC, 0xEF, 0xF4) };
-static const pcolor_t COL_TRACK  = { .rgba = RGB(0x1E, 0x22, 0x2A) };
+static const pcolor_t COL_PANEL  = PCOLOR_RGB_INIT(0x2A, 0x2E, 0x38);
+static const pcolor_t COL_TITLE  = PCOLOR_RGB_INIT(0x3A, 0x40, 0x4E);
+static const pcolor_t COL_EDGE   = PCOLOR_RGB_INIT(0x15, 0x17, 0x1D);
+static const pcolor_t COL_BTN    = PCOLOR_RGB_INIT(0x44, 0x4B, 0x5A);
+static const pcolor_t COL_HOT    = PCOLOR_RGB_INIT(0x57, 0x60, 0x72);
+static const pcolor_t COL_DOWN   = PCOLOR_RGB_INIT(0x24, 0x29, 0x33);
+static const pcolor_t COL_ON     = PCOLOR_RGB_INIT(0x2E, 0x7D, 0xD1);
+static const pcolor_t COL_TEXT   = PCOLOR_RGB_INIT(0xEC, 0xEF, 0xF4);
+static const pcolor_t COL_TRACK  = PCOLOR_RGB_INIT(0x1E, 0x22, 0x2A);
 
 /* 1px border drawn just inside r. */
 static void rect_outline(platform_framebuffer_t *fb, rect2d_t r, pcolor_t c) {
@@ -40,8 +40,8 @@ static void blend_rect(platform_framebuffer_t *fb, rect2d_t r, pcolor_t src) {
 
 /* Alpha backdrop, so a translucent swatch reads as translucent. */
 static void checker_rect(platform_framebuffer_t *fb, rect2d_t r, int cell) {
-    const pcolor_t a = { .rgba = RGB(0x90, 0x90, 0x90) };
-    const pcolor_t b = { .rgba = RGB(0x60, 0x60, 0x60) };
+    const pcolor_t a = PCOLOR_RGB_INIT(0x90, 0x90, 0x90);
+    const pcolor_t b = PCOLOR_RGB_INIT(0x60, 0x60, 0x60);
     if (cell < 1) cell = 1;
     for (int y = 0; y < r.h; y += cell)
         for (int x = 0; x < r.w; x += cell) {
